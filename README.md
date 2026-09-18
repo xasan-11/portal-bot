@@ -238,4 +238,5 @@ migration time — so old data is preserved and inspectable but never bleeds
 into a real account's view. This is a one-time, idempotent migration; it
 does nothing on an already-migrated or brand-new database.
 #   p o r t a l - b o t  
+ #   p o r t a l - b o t  
  
