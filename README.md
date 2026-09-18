@@ -71,10 +71,12 @@ left out per the request to never invent non-official APIs.
   ever — regardless of that offer's outcome), checks the owner meets the
   configured level/NFT-count limits (`src/telegram/ownerChecks.ts`), and
   sends an offer (125 ⭐, 6h expiry by default) for anything that clears all
-  of that. It works off what's currently on Telegram's resale market — not
-  Portal, and not "recently withdrawn" gifts (Telegram's API has no
-  withdraw/listing timestamp anyway) — so every listing that fits your
-  conditions is a candidate.
+  of that. It only offers on listings that appeared on Telegram's resale
+  market within the last minute: Telegram has no listing timestamp, so this
+  is inferred from polling — the first scan after Start only records what's
+  already listed, then a listing counts only if the bot first saw it <60s
+  ago (`NEW_LISTING_WINDOW_MS`). Listings that appear while paused/stopped
+  are never offered on.
 - **Owner eligibility** (`src/telegram/ownerChecks.ts`) — before offering,
   checks the owner's Telegram "Level" (`users.getFullUser` →
   `userFull.stars_rating.level`, per

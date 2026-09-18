@@ -1,6 +1,6 @@
 import { errors } from "teleproto";
 import { getSettings } from "../database/repositories/settingsRepo";
-import { listEnabledSelectedNfts } from "../database/repositories/selectedNftsRepo";
+import { listEnabledSelectedNfts, markBaselined, resetBaselines } from "../database/repositories/selectedNftsRepo";
 import { getResaleListings } from "../telegram/gifts";
 import { sendGiftOffer, registerOfferResolutionListener } from "../telegram/offers";
 import { checkOwnerEligibility } from "../telegram/ownerChecks";
@@ -33,6 +33,9 @@ export type AutomationStatus = "stopped" | "running" | "paused_spam" | "paused_b
  */
 const PAUSE_RECHECK_INTERVAL_MS = 90_000; // 1.5 minutes — within the requested 1-2 minute range
 
+/** Only listings first seen within this window get an offer. */
+const NEW_LISTING_WINDOW_MS = 60_000;
+
 let status: AutomationStatus = "stopped";
 let timer: NodeJS.Timeout | null = null;
 let ticking = false;
@@ -49,6 +52,7 @@ export function isAutomationRunning(): boolean {
 export function startAutomation(): void {
   if (status !== "stopped") return;
   status = "running";
+  resetBaselines(); // listings that appeared while we weren't watching aren't "fresh"
   registerOfferResolutionListener();
   scheduleNextTick(0);
 }
@@ -114,19 +118,26 @@ async function tick(): Promise<void> {
       continue;
     }
 
-    // Every listing currently on Telegram's resale market for this
-    // collection is a candidate — eligibility is decided purely by the
-    // configured conditions (owner level, owner NFT count, one offer per
-    // owner/instance), not by when the gift was withdrawn or listed.
+    // Telegram exposes no listing timestamp, so "listed just now" is
+    // inferred from our own polling: the first scan of a collection only
+    // records what's already there (snapshot); after that, a listing is a
+    // candidate only if we first saw it within NEW_LISTING_WINDOW_MS.
+    const isSnapshotScan = nft.baselined === 0;
+
     for (const listing of listings) {
       if (getAutomationStatus() === "stopped") return;
 
       // Discovery/logging always happens, even while paused — only sending is gated.
-      upsertSeenNft({
+      const seen = upsertSeenNft({
         identifier: listing.slug,
         name: listing.name,
         ownerId: listing.ownerId,
       });
+
+      if (isSnapshotScan) continue; // already on the market before we started watching
+
+      const ageMs = Date.now() - Date.parse(seen.first_seen_at + "Z");
+      if (ageMs > NEW_LISTING_WINDOW_MS) continue; // not a fresh listing
 
       if (hasOwnerBeenOffered(listing.ownerId)) {
         continue; // this owner already received an offer (any NFT, any status) — one offer per owner, full stop
@@ -195,6 +206,8 @@ async function tick(): Promise<void> {
         }
       }
     }
+
+    if (isSnapshotScan) markBaselined(nft.nft_identifier);
   }
 
   if (getAutomationStatus() === "running") {

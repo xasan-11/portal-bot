@@ -60,6 +60,22 @@ export function saveSelection(items: { identifier: string; name: string }[]): vo
   tx(items);
 }
 
+/** Marks a collection's initial snapshot scan as done (see monitor.ts). */
+export function markBaselined(identifier: string): void {
+  const userId = requireCurrentUserId();
+  db.prepare("UPDATE selected_nfts SET baselined = 1 WHERE user_id = ? AND nft_identifier = ?").run(
+    userId,
+    identifier
+  );
+}
+
+/** Forces a fresh snapshot scan for every collection (used on automation start). */
+export function resetBaselines(): void {
+  const userId = getCurrentUserId();
+  if (userId == null) return;
+  db.prepare("UPDATE selected_nfts SET baselined = 0 WHERE user_id = ?").run(userId);
+}
+
 export function isIdentifierSelected(identifier: string): boolean {
   const userId = getCurrentUserId();
   if (userId == null) return false;
