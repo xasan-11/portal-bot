@@ -36,10 +36,7 @@ export function listEnabledSelectedNfts(): SelectedNft[] {
 /**
  * Replaces the current account's full selection set with exactly the given
  * identifiers (enabled = true). Uses upsert rather than delete-and-reinsert
- * for identifiers that stay selected, so re-saving (e.g. adding one more
- * NFT to an existing selection) doesn't reset `baselined` on collections
- * already past their warm-up scan — only genuinely new selections start
- * at baselined = 0.
+ * so re-saving an unchanged selection leaves existing rows untouched.
  */
 export function saveSelection(items: { identifier: string; name: string }[]): void {
   const userId = requireCurrentUserId();
@@ -61,15 +58,6 @@ export function saveSelection(items: { identifier: string; name: string }[]): vo
     }
   });
   tx(items);
-}
-
-/** Marks a collection's one-time no-offer warm-up scan as complete (see monitor.ts). */
-export function markBaselined(identifier: string): void {
-  const userId = requireCurrentUserId();
-  db.prepare("UPDATE selected_nfts SET baselined = 1 WHERE user_id = ? AND nft_identifier = ?").run(
-    userId,
-    identifier
-  );
 }
 
 export function isIdentifierSelected(identifier: string): boolean {
