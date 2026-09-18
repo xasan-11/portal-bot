@@ -6,7 +6,11 @@ import { spawn } from "node:child_process";
 
 const port = process.env.PORT || "3000";
 
-const child = spawn("npx", ["serve", "-s", "dist", "-l", port], {
+// `-l <port>` alone left `serve` bound to localhost only, which Railway
+// can't route external traffic to (confirmed from the deploy logs: 502
+// despite the process being up). An explicit tcp:// listen URI binds it to
+// 0.0.0.0, reachable from outside the container.
+const child = spawn("npx", ["serve", "-s", "dist", "-l", `tcp://0.0.0.0:${port}`], {
   stdio: "inherit",
   shell: process.platform === "win32",
 });
