@@ -1,0 +1,19 @@
+node_modules/
+dist/
+client/dist/
+client/node_modules/
+
+# secrets & sessions — never commit
+.env
+.env.*
+!.env.example
+data/
+*.session
+*.session-journal
+
+# logs
+*.log
+npm-debug.log*
+
+.DS_Store
+Thumbs.db
