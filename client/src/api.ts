@@ -1,4 +1,8 @@
-const BASE = "/api";
+// Set at build time (Vite inlines VITE_-prefixed vars). Unset = same-origin
+// (local dev via Vite's proxy, or a single unified service) — set it to the
+// backend's URL when the dashboard is deployed as its own separate service.
+export const API_ORIGIN = (import.meta.env.VITE_API_URL ?? "").replace(/\/$/, "");
+const BASE = `${API_ORIGIN}/api`;
 
 async function request<T>(path: string, options?: RequestInit): Promise<T> {
   const res = await fetch(BASE + path, {
@@ -95,7 +99,17 @@ export const api = {
   logout: () => request<{ ok: boolean }>("/auth/logout", { method: "POST" }),
 
   account: () => request<AccountInfo>("/account"),
-  catalog: () => request<NftCatalogItem[]>("/nfts/catalog"),
+  // imageUrl comes back as a path relative to the BACKEND ("/gift-thumbnails/x.webp"),
+  // which only resolves correctly on its own if this dashboard is same-origin
+  // with the API. Resolved to an absolute URL here so it still works when
+  // deployed as a separate static service pointed at VITE_API_URL.
+  catalog: () =>
+    request<NftCatalogItem[]>("/nfts/catalog").then((items) =>
+      items.map((item) => ({
+        ...item,
+        imageUrl: item.imageUrl ? `${API_ORIGIN}${item.imageUrl}` : null,
+      }))
+    ),
   selected: () => request<SelectedNft[]>("/nfts/selected"),
   saveSelected: (items: { identifier: string; name: string }[]) =>
     request<{ ok: boolean; count: number }>("/nfts/selected", {

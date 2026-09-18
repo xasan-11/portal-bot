@@ -173,3 +173,23 @@ export function migrateLegacySchema(db: Database.Database): void {
   run();
   console.log("[migrate] done.");
 }
+
+/**
+ * Adds `selected_nfts.baselined` for databases created before the warm-up
+ * scan existed (a plain additive column — no rebuild needed, unlike the
+ * per-account migration above). Existing rows default to 0, meaning every
+ * already-selected collection gets exactly one no-offer warm-up scan the
+ * next time automation runs, before offers resume as normal.
+ */
+export function ensureBaselinedColumn(db: Database.Database): void {
+  const tableExists = (
+    db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='selected_nfts'").get()
+  ) as { 1: number } | undefined;
+  if (!tableExists) return; // fresh database — schema.sql creates it with the column already
+
+  const cols = db.prepare("PRAGMA table_info(selected_nfts)").all() as { name: string }[];
+  if (cols.some((c) => c.name === "baselined")) return; // already migrated
+
+  db.exec("ALTER TABLE selected_nfts ADD COLUMN baselined INTEGER NOT NULL DEFAULT 0");
+  console.log("[migrate] selected_nfts: added `baselined` column (defaults to 0 — one warm-up scan per collection)");
+}

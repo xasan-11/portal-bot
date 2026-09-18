@@ -21,6 +21,11 @@ CREATE TABLE IF NOT EXISTS selected_nfts (
   nft_identifier TEXT NOT NULL,
   nft_name TEXT NOT NULL,
   enabled INTEGER NOT NULL DEFAULT 1,
+  -- Whether the initial no-offer warm-up scan has completed for this
+  -- collection (see src/automation/monitor.ts) — without this, every gift
+  -- already resale-listed before we ever looked would be mistaken for a
+  -- brand-new discovery on the very first scan.
+  baselined INTEGER NOT NULL DEFAULT 0,
   created_at TEXT NOT NULL DEFAULT (datetime('now')),
   UNIQUE (user_id, nft_identifier)
 );

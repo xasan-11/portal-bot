@@ -1,6 +1,6 @@
 import { errors } from "teleproto";
 import { getSettings } from "../database/repositories/settingsRepo";
-import { listEnabledSelectedNfts } from "../database/repositories/selectedNftsRepo";
+import { listEnabledSelectedNfts, markBaselined } from "../database/repositories/selectedNftsRepo";
 import { getResaleListings } from "../telegram/gifts";
 import { sendGiftOffer, registerOfferResolutionListener } from "../telegram/offers";
 import { checkOwnerEligibility } from "../telegram/ownerChecks";
@@ -114,6 +114,16 @@ async function tick(): Promise<void> {
       continue;
     }
 
+    // Telegram's API has no timestamp for when a gift was withdrawn/listed
+    // (verified against the official schema — see the conversation this was
+    // fixed in), so "first time OUR bot has seen this collection" is not
+    // safe to treat as "just happened": on the very first scan, everything
+    // currently resale-listed — however old — would otherwise look brand
+    // new and get an immediate offer. This warm-up pass records the
+    // starting snapshot without offering on any of it; only listings that
+    // appear in a *later* scan are genuinely new.
+    const isBaselineScan = nft.baselined === 0;
+
     for (const listing of listings) {
       if (getAutomationStatus() === "stopped") return;
 
@@ -123,6 +133,10 @@ async function tick(): Promise<void> {
         name: listing.name,
         ownerId: listing.ownerId,
       });
+
+      if (isBaselineScan) {
+        continue; // seen and recorded, but this is the starting snapshot — never offered on
+      }
 
       if (hasOwnerBeenOffered(listing.ownerId)) {
         continue; // this owner already received an offer (any NFT, any status) — one offer per owner, full stop
@@ -190,6 +204,13 @@ async function tick(): Promise<void> {
           markProcessed(listing.slug, "skipped");
         }
       }
+    }
+
+    if (isBaselineScan) {
+      markBaselined(nft.nft_identifier);
+      console.log(
+        `[automation] baseline scan complete for ${nft.nft_name} (${listings.length} existing listing(s) recorded, none offered on) — future scans will offer on genuinely new listings`
+      );
     }
   }
 

@@ -11,14 +11,24 @@ function required(name: string): string {
   return value;
 }
 
+// Railway (and most PaaS providers) inject PORT and expect the app to bind
+// to it; WEB_PORT remains for local dev where nothing else sets PORT.
+const webPort = Number(process.env.PORT ?? process.env.WEB_PORT ?? 3001);
+
+const databasePath = path.resolve(process.cwd(), process.env.DATABASE_PATH ?? "./data/app.db");
+
 export const env = {
   telegramApiId: Number(required("TELEGRAM_API_ID")),
   telegramApiHash: required("TELEGRAM_API_HASH"),
   botToken: required("TELEGRAM_BOT_TOKEN"),
-  webPort: Number(process.env.WEB_PORT ?? 3001),
+  webPort,
   webPublicUrl: process.env.WEB_PUBLIC_URL ?? "http://localhost:3000",
-  databasePath: path.resolve(process.cwd(), process.env.DATABASE_PATH ?? "./data/app.db"),
+  databasePath,
   sessionFilePath: path.resolve(process.cwd(), process.env.SESSION_FILE_PATH ?? "./data/telegram.session"),
   sessionEncryptionKey: required("SESSION_ENCRYPTION_KEY"),
-  giftThumbnailsDir: path.resolve(process.cwd(), "./data/gift-thumbnails"),
+  // Deliberately not a separate env var: lives next to the database, so
+  // pointing DATABASE_PATH at a Railway volume (e.g. /data/app.db) carries
+  // the thumbnail cache onto that same persistent volume automatically
+  // instead of the container's ephemeral filesystem.
+  giftThumbnailsDir: path.join(path.dirname(databasePath), "gift-thumbnails"),
 };
