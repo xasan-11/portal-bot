@@ -285,11 +285,28 @@ dashboard, so treat it as the source of truth.
 | `DATABASE_PATH` | `/data/app.db` (see volume step below) |
 | `SESSION_FILE_PATH` | `/data/telegram.session` |
 | `WEB_PUBLIC_URL` | the **frontend's** Railway domain, e.g. `https://your-frontend.up.railway.app` — this is what CORS allows and what the bot's "🔐 Login qilish" button links to |
+| `NIXPACKS_NODE_VERSION` | `20` (see below — belt-and-suspenders alongside `engines.node`) |
 
 Don't set `PORT` or `WEB_PORT` — Railway injects `PORT` itself, and
 `src/config/env.ts` prefers it automatically (`server.ts` also binds to
 `0.0.0.0` explicitly, required to be reachable inside a container, not just
 from localhost).
+
+**Node version matters here, concretely, not just as a best practice**:
+`better-sqlite3` ships prebuilt native binaries per Node major version, and
+compiles from source (via node-gyp) if none matches — which failed on
+Railway when Nixpacks picked Node 24 (confirmed cause: the previous
+`engines.node` was `">=20.0.0"`, an open range, but Nixpacks only recognizes
+an exact major like `"20"` or `"20.x"` — anything else falls through to
+whatever it defaults to). `better-sqlite3`'s locked version
+(`11.10.0`) has confirmed prebuilt binaries for Node 20 but not 24, so
+pinning to 20 avoids native compilation entirely rather than depending on
+build tools (python/make/g++) being present in the image. Both `engines.node`
+(root and `client/package.json`) and `.nvmrc` are already pinned to `20` in
+this repo; setting `NIXPACKS_NODE_VERSION=20` as well costs nothing and sits
+at the top of Nixpacks' own precedence order (env var > `engines.node` >
+`.nvmrc`), so it can't be defeated by a future accidental change to either
+file.
 
 **Add a persistent volume**, mount path `/data` (any path works as long as
 `DATABASE_PATH`/`SESSION_FILE_PATH` above point at it) — the SQLite database
@@ -314,6 +331,7 @@ port or route beyond the one Railway exposes for the API.
 | Variable | Value |
 |---|---|
 | `VITE_API_URL` | the **backend's** Railway domain, e.g. `https://your-backend.up.railway.app` (no trailing slash) |
+| `NIXPACKS_NODE_VERSION` | `20` (this service has no native deps, but pinned for consistency — see the backend section above for why) |
 
 `VITE_API_URL` is inlined into the JS bundle **at build time** — changing it
 requires a rebuild (a redeploy triggers one; just restarting the service
