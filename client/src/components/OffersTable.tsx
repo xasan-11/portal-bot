@@ -17,7 +17,14 @@ const STATUS_LABEL: Record<Offer["status"], string> = {
 };
 
 export default function OffersTable({ offers }: { offers: Offer[] }) {
-  if (offers.length === 0) {
+  // Defense in depth: api.ts already guarantees this is an array, but a
+  // production incident (VITE_API_URL misconfigured, hitting this site's
+  // own SPA fallback instead of the backend) previously let a non-array
+  // value reach here and crash the whole page with no error boundary — this
+  // component should never trust that upstream guarantee alone again.
+  const rows = Array.isArray(offers) ? offers : [];
+
+  if (rows.length === 0) {
     return <div className="text-slate-500 text-sm py-6 text-center">Hozircha offerlar yo'q</div>;
   }
 
@@ -35,7 +42,7 @@ export default function OffersTable({ offers }: { offers: Offer[] }) {
           </tr>
         </thead>
         <tbody>
-          {offers.map((offer) => (
+          {rows.map((offer) => (
             <tr key={offer.id} className="border-b border-base-800 hover:bg-base-800/50 transition-colors">
               <td className="py-2.5 pr-4 font-mono text-xs text-slate-300">{offer.nft_identifier}</td>
               <td className="py-2.5 pr-4 text-slate-400">{offer.owner_id}</td>

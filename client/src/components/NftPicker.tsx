@@ -29,7 +29,12 @@ export default function NftPicker({
   selected: Set<string>;
   onToggle: (identifier: string) => void;
 }) {
-  if (catalog.length === 0) {
+  // Defense in depth: api.ts already guarantees this is an array, but this
+  // component should never crash the whole page (no error boundary above
+  // it) just because an upstream guarantee didn't hold in some edge case.
+  const items = Array.isArray(catalog) ? catalog : [];
+
+  if (items.length === 0) {
     return (
       <div className="text-slate-500 text-sm py-6 text-center">
         Gift katalogini yuklab bo'lmadi yoki hozircha collectible turlar topilmadi.
@@ -39,7 +44,7 @@ export default function NftPicker({
 
   return (
     <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
-      {catalog.map((item) => {
+      {items.map((item) => {
         const isSelected = selected.has(item.identifier);
         return (
           <button

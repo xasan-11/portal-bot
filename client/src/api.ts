@@ -9,9 +9,25 @@ async function request<T>(path: string, options?: RequestInit): Promise<T> {
     headers: { "Content-Type": "application/json" },
     ...options,
   });
-  const data = await res.json().catch(() => ({}));
+
+  // A 200 with a non-JSON body (almost always this dashboard's own
+  // index.html) means the request never reached the backend at all — most
+  // likely VITE_API_URL is unset/stale in this build, so "/api/..." resolved
+  // against this static site's own domain and got caught by its SPA
+  // fallback instead of the real API. Treating that as success (silently
+  // decoding to {}) is exactly what let bad data reach .map() calls
+  // downstream, so it's surfaced as a real error here instead.
+  const contentType = res.headers.get("content-type") ?? "";
+  const isJson = contentType.includes("application/json");
+  const data = isJson ? await res.json().catch(() => null) : null;
+
   if (!res.ok) {
-    throw new Error((data as { error?: string }).error ?? "So'rov bajarilmadi");
+    throw new Error((data as { error?: string } | null)?.error ?? `So'rov bajarilmadi (HTTP ${res.status})`);
+  }
+  if (data === null) {
+    throw new Error(
+      "Backend'dan JSON javob kelmadi — VITE_API_URL to'g'ri sozlanganini va build shu qiymat bilan qayta yaratilganini tekshiring."
+    );
   }
   return data as T;
 }
@@ -105,12 +121,13 @@ export const api = {
   // deployed as a separate static service pointed at VITE_API_URL.
   catalog: () =>
     request<NftCatalogItem[]>("/nfts/catalog").then((items) =>
-      items.map((item) => ({
+      (Array.isArray(items) ? items : []).map((item) => ({
         ...item,
         imageUrl: item.imageUrl ? `${API_ORIGIN}${item.imageUrl}` : null,
       }))
     ),
-  selected: () => request<SelectedNft[]>("/nfts/selected"),
+  selected: () =>
+    request<SelectedNft[]>("/nfts/selected").then((rows) => (Array.isArray(rows) ? rows : [])),
   saveSelected: (items: { identifier: string; name: string }[]) =>
     request<{ ok: boolean; count: number }>("/nfts/selected", {
       method: "POST",
@@ -124,6 +141,6 @@ export const api = {
   start: () => request<{ running: boolean }>("/automation/start", { method: "POST" }),
   stop: () => request<{ running: boolean }>("/automation/stop", { method: "POST" }),
 
-  offers: () => request<Offer[]>("/offers"),
+  offers: () => request<Offer[]>("/offers").then((rows) => (Array.isArray(rows) ? rows : [])),
   stats: () => request<Stats>("/stats"),
 };

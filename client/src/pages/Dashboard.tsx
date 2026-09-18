@@ -42,16 +42,32 @@ export default function Dashboard() {
   const [loggingOut, setLoggingOut] = useState(false);
 
   const refresh = useCallback(async () => {
-    const [acc, st, off, se] = await Promise.all([
-      api.account(),
-      api.stats(),
-      api.offers(),
-      api.settings(),
-    ]);
-    setAccount(acc);
-    setStats(st);
-    setOffers(off);
-    setSettings(se);
+    // Each call is independently guarded (api.ts already coerces list
+    // endpoints to real arrays) — but one endpoint failing (e.g. a
+    // transient network hiccup) shouldn't leave the others unrendered, so
+    // they're awaited individually rather than via Promise.all, which
+    // rejects entirely on the first failure.
+    try {
+      setAccount(await api.account());
+    } catch (err) {
+      console.error("Failed to refresh account:", err);
+    }
+    try {
+      setStats(await api.stats());
+    } catch (err) {
+      console.error("Failed to refresh stats:", err);
+    }
+    try {
+      setOffers(await api.offers());
+    } catch (err) {
+      console.error("Failed to refresh offers:", err);
+      setOffers([]);
+    }
+    try {
+      setSettings(await api.settings());
+    } catch (err) {
+      console.error("Failed to refresh settings:", err);
+    }
   }, []);
 
   useEffect(() => {
@@ -62,8 +78,20 @@ export default function Dashboard() {
 
   useEffect(() => {
     if (!account?.connected) return;
-    api.catalog().then(setCatalog).catch(() => setCatalog([]));
-    api.selected().then((rows) => setSelected(new Set(rows.map((r) => r.nft_identifier))));
+    api
+      .catalog()
+      .then(setCatalog)
+      .catch((err) => {
+        console.error("Failed to load NFT catalog:", err);
+        setCatalog([]);
+      });
+    api
+      .selected()
+      .then((rows) => setSelected(new Set(rows.map((r) => r.nft_identifier))))
+      .catch((err) => {
+        console.error("Failed to load selected NFTs:", err);
+        setSelected(new Set());
+      });
   }, [account?.connected]);
 
   async function toggleAutomation() {
