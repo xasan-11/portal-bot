@@ -1,5 +1,4 @@
 import { db } from "../db";
-import { getCurrentUserId } from "./appStateRepo";
 
 export interface AutomationSettings {
   stars: number;
@@ -31,11 +30,8 @@ function getRaw(userId: number, key: string): string | undefined {
   return row?.value;
 }
 
-/** Settings are per-account. With nobody connected, defaults are returned (nothing to scope to yet). */
-export function getSettings(): AutomationSettings {
-  const userId = getCurrentUserId();
-  if (userId == null) return { ...DEFAULT_SETTINGS };
-
+/** Settings are per-user; anything not yet saved falls back to the defaults. */
+export function getSettings(userId: number): AutomationSettings {
   return {
     stars: Number(getRaw(userId, "stars") ?? DEFAULT_SETTINGS.stars),
     duration: Number(getRaw(userId, "duration") ?? DEFAULT_SETTINGS.duration),
@@ -48,11 +44,8 @@ export function getSettings(): AutomationSettings {
   };
 }
 
-export function updateSettings(partial: Partial<AutomationSettings>): AutomationSettings {
-  const userId = getCurrentUserId();
-  if (userId == null) throw new Error("No Telegram account is currently connected");
-
-  const current = getSettings();
+export function updateSettings(userId: number, partial: Partial<AutomationSettings>): AutomationSettings {
+  const current = getSettings(userId);
   const next = { ...current, ...partial };
   setStmt.run(userId, "stars", String(next.stars));
   setStmt.run(userId, "duration", String(next.duration));

@@ -1,10 +1,15 @@
 import "./database/db"; // initializes schema on import
 import { createBot } from "./bot/bot";
 import { startWebServer } from "./web/server";
-import { isLoggedIn } from "./telegram/client";
-import { registerOfferResolutionListener } from "./telegram/offers";
+import { migrateLegacySessionFile } from "./telegram/sessionStore";
+import { restoreSessions } from "./tenant";
+import { env } from "./config/env";
 
 async function main() {
+  if (!env.adminTelegramId) {
+    console.warn("[access] ADMIN_TELEGRAM_ID is not set — nobody is admin, so nobody can be approved or use the bot");
+  }
+  migrateLegacySessionFile(); // old single-account session -> admin's per-user session
   startWebServer();
 
   const bot = createBot();
@@ -18,13 +23,7 @@ async function main() {
       );
     });
 
-  try {
-    if (await isLoggedIn()) {
-      registerOfferResolutionListener();
-    }
-  } catch (err) {
-    console.error("[telegram] Could not check login state at startup:", err);
-  }
+  restoreSessions().catch((err) => console.error("[startup] session restore failed:", err));
 
   process.once("SIGINT", () => bot.stop("SIGINT"));
   process.once("SIGTERM", () => bot.stop("SIGTERM"));

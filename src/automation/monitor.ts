@@ -36,71 +36,102 @@ const PAUSE_RECHECK_INTERVAL_MS = 90_000; // 1.5 minutes — within the requeste
 /** Only listings first seen within this window get an offer. */
 const NEW_LISTING_WINDOW_MS = 60_000;
 
-let status: AutomationStatus = "stopped";
-let timer: NodeJS.Timeout | null = null;
-let ticking = false;
+/**
+ * Identifies one bot user: `tenantId` is their verified Telegram user id
+ * (keys their MTProto client and session file), `userId` is their `users.id`
+ * (scopes every DB row). Each user has fully independent automation state.
+ */
+export interface TenantCtx {
+  tenantId: string;
+  userId: number;
+}
 
-export function getAutomationStatus(): AutomationStatus {
-  return status;
+interface AutomationState {
+  status: AutomationStatus;
+  timer: NodeJS.Timeout | null;
+  ticking: boolean;
+}
+
+const states = new Map<number, AutomationState>();
+
+function getState(ctx: TenantCtx): AutomationState {
+  let st = states.get(ctx.userId);
+  if (!st) {
+    st = { status: "stopped", timer: null, ticking: false };
+    states.set(ctx.userId, st);
+  }
+  return st;
+}
+
+function setStatus(ctx: TenantCtx, status: AutomationStatus): void {
+  getState(ctx).status = status;
+}
+
+export function getAutomationStatus(ctx: TenantCtx): AutomationStatus {
+  return getState(ctx).status;
 }
 
 /** True whenever automation is active in any form (running or paused) — i.e. not fully stopped. */
-export function isAutomationRunning(): boolean {
-  return status !== "stopped";
+export function isAutomationRunning(ctx: TenantCtx): boolean {
+  return getState(ctx).status !== "stopped";
 }
 
-export function startAutomation(): void {
-  if (status !== "stopped") return;
-  status = "running";
-  resetBaselines(); // listings that appeared while we weren't watching aren't "fresh"
-  registerOfferResolutionListener();
-  scheduleNextTick(0);
+export function startAutomation(ctx: TenantCtx): void {
+  const st = getState(ctx);
+  if (st.status !== "stopped") return;
+  st.status = "running";
+  resetBaselines(ctx.userId); // listings that appeared while we weren't watching aren't "fresh"
+  registerOfferResolutionListener(ctx.tenantId);
+  scheduleNextTick(ctx, 0);
 }
 
 /** Full stop: no more sending AND no more background monitoring. Offers already sent are left alone. */
-export function stopAutomation(): void {
-  status = "stopped";
-  if (timer) clearTimeout(timer);
-  timer = null;
+export function stopAutomation(ctx: TenantCtx): void {
+  const st = getState(ctx);
+  st.status = "stopped";
+  if (st.timer) clearTimeout(st.timer);
+  st.timer = null;
 }
 
-function scheduleNextTick(delayMs?: number): void {
-  if (status === "stopped") return;
-  const settings = getSettings();
+function scheduleNextTick(ctx: TenantCtx, delayMs?: number): void {
+  const st = getState(ctx);
+  if (st.status === "stopped") return;
+  const settings = getSettings(ctx.userId);
   const delay =
-    delayMs ?? (status === "running" ? settings.monitoringIntervalSeconds * 1000 : PAUSE_RECHECK_INTERVAL_MS);
-  timer = setTimeout(async () => {
-    if (!ticking) {
-      ticking = true;
+    delayMs ?? (st.status === "running" ? settings.monitoringIntervalSeconds * 1000 : PAUSE_RECHECK_INTERVAL_MS);
+  st.timer = setTimeout(async () => {
+    if (!st.ticking) {
+      st.ticking = true;
       try {
-        await tick();
+        await tick(ctx);
       } catch (err) {
-        console.error("[automation] monitoring tick failed:", err);
+        console.error(`[automation] monitoring tick failed (user ${ctx.tenantId}):`, err);
       } finally {
-        ticking = false;
+        st.ticking = false;
       }
     }
-    scheduleNextTick();
+    scheduleNextTick(ctx);
   }, delay);
 }
 
-async function tick(): Promise<void> {
-  const settings = getSettings();
+async function tick(ctx: TenantCtx): Promise<void> {
+  const { tenantId, userId } = ctx;
+  const settings = getSettings(userId);
 
-  if (status === "paused_balance") {
-    const balance = await getStarsBalance();
+  if (getAutomationStatus(ctx) === "paused_balance") {
+    const balance = await getStarsBalance(tenantId);
     if (balance != null && balance >= settings.stars) {
-      console.log(`[automation] balance recovered (${balance} ⭐) — resuming`);
-      status = "running";
+      console.log(`[automation] balance recovered (${balance} ⭐, user ${tenantId}) — resuming`);
+      setStatus(ctx, "running");
     }
   }
 
   // Spam pause gets exactly one real send attempt this tick (see comment above);
   // everything else (discovery/logging, balance-paused ticks, stopped) sends freely
   // or not at all based on `status` alone.
-  let spamProbeAvailable = status === "paused_spam";
+  let spamProbeAvailable = getAutomationStatus(ctx) === "paused_spam";
 
-  const selected = listEnabledSelectedNfts();
+  const selected = listEnabledSelectedNfts(userId);
 
   for (const nft of selected) {
     // Re-read via the exported getter (not the closed-over `status`) — this can
@@ -108,11 +139,11 @@ async function tick(): Promise<void> {
     // hits Stop mid-tick), and going through a function call avoids
     // TypeScript incorrectly treating the earlier narrowing as still valid
     // across those `await` points.
-    if (getAutomationStatus() === "stopped") return;
+    if (getAutomationStatus(ctx) === "stopped") return;
 
     let listings;
     try {
-      listings = await getResaleListings(nft.nft_identifier);
+      listings = await getResaleListings(tenantId, nft.nft_identifier);
     } catch (err) {
       console.error(`[automation] failed to fetch resale listings for ${nft.nft_name}:`, err);
       continue;
@@ -125,10 +156,10 @@ async function tick(): Promise<void> {
     const isSnapshotScan = nft.baselined === 0;
 
     for (const listing of listings) {
-      if (getAutomationStatus() === "stopped") return;
+      if (getAutomationStatus(ctx) === "stopped") return;
 
       // Discovery/logging always happens, even while paused — only sending is gated.
-      const seen = upsertSeenNft({
+      const seen = upsertSeenNft(userId, {
         identifier: listing.slug,
         name: listing.name,
         ownerId: listing.ownerId,
@@ -139,11 +170,11 @@ async function tick(): Promise<void> {
       const ageMs = Date.now() - Date.parse(seen.first_seen_at + "Z");
       if (ageMs > NEW_LISTING_WINDOW_MS) continue; // not a fresh listing
 
-      if (hasOwnerBeenOffered(listing.ownerId)) {
+      if (hasOwnerBeenOffered(userId, listing.ownerId)) {
         continue; // this owner already received an offer (any NFT, any status) — one offer per owner, full stop
       }
 
-      if (hasBlockingOffer(listing.slug)) {
+      if (hasBlockingOffer(userId, listing.slug)) {
         continue; // already offered on this exact collectible instance — skip (duplicate protection)
       }
 
@@ -151,14 +182,14 @@ async function tick(): Promise<void> {
         continue; // matched and logged, but sending is disabled in settings
       }
 
-      const canAttemptSend = getAutomationStatus() === "running" || spamProbeAvailable;
+      const canAttemptSend = getAutomationStatus(ctx) === "running" || spamProbeAvailable;
       if (!canAttemptSend) {
         continue; // paused on balance, or spam probe already used this tick
       }
 
       let eligibility;
       try {
-        eligibility = await checkOwnerEligibility(listing.ownerPeer, {
+        eligibility = await checkOwnerEligibility(tenantId, listing.ownerPeer, {
           maxOwnerLevel: settings.maxOwnerLevel,
           maxOwnerNftCount: settings.maxOwnerNftCount,
         });
@@ -174,55 +205,55 @@ async function tick(): Promise<void> {
       if (wasProbe) spamProbeAvailable = false; // consume the probe regardless of outcome
 
       try {
-        const { telegramOfferId } = await sendGiftOffer({
+        const { telegramOfferId } = await sendGiftOffer(tenantId, {
           ownerPeer: listing.ownerPeer,
           slug: listing.slug,
           stars: settings.stars,
           durationSeconds: settings.duration,
         });
-        createOffer({
+        createOffer(userId, {
           nftIdentifier: listing.slug,
           ownerId: listing.ownerId,
           stars: settings.stars,
           duration: settings.duration,
           telegramOfferId,
         });
-        markProcessed(listing.slug, "processed");
-        await addOwnerToOfferFolder(listing.ownerPeer, listing.ownerId);
+        markProcessed(userId, listing.slug, "processed");
+        await addOwnerToOfferFolder(tenantId, listing.ownerPeer, listing.ownerId);
         if (wasProbe) {
           console.log(`[automation] spam probe succeeded (${listing.slug}) — resuming normal operation`);
-          status = "running";
+          setStatus(ctx, "running");
         }
       } catch (err) {
         if (err instanceof errors.PeerFloodError) {
           console.warn(`[automation] PEER_FLOOD on ${listing.slug} — pausing new offers, monitoring continues`);
-          status = "paused_spam";
+          setStatus(ctx, "paused_spam");
         } else if (err instanceof errors.BalanceTooLowError) {
           console.warn(`[automation] BALANCE_TOO_LOW on ${listing.slug} — pausing new offers, monitoring continues`);
-          status = "paused_balance";
+          setStatus(ctx, "paused_balance");
         } else {
           console.error(`[automation] failed to send offer for ${listing.slug}:`, err);
-          markProcessed(listing.slug, "skipped");
+          markProcessed(userId, listing.slug, "skipped");
         }
       }
     }
 
-    if (isSnapshotScan) markBaselined(nft.nft_identifier);
+    if (isSnapshotScan) markBaselined(userId, nft.nft_identifier);
   }
 
-  if (getAutomationStatus() === "running") {
-    await expireStaleOffers();
+  if (getAutomationStatus(ctx) === "running") {
+    await expireStaleOffers(ctx);
   }
 }
 
 /** Fallback in case a decline/accept service message was missed. */
-async function expireStaleOffers(): Promise<void> {
+async function expireStaleOffers(ctx: TenantCtx): Promise<void> {
   const now = Date.now();
-  for (const offer of listPendingOffers()) {
+  for (const offer of listPendingOffers(ctx.userId)) {
     const createdAtMs = Date.parse(offer.created_at + "Z");
     if (now - createdAtMs > offer.duration * 1000) {
       updateOfferStatus(offer.id, "expired");
-      await removeOwnerFromOfferFolder(offer.owner_id);
+      await removeOwnerFromOfferFolder(ctx.tenantId, offer.owner_id);
     }
   }
 }

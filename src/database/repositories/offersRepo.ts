@@ -1,5 +1,4 @@
 import { db } from "../db";
-import { getCurrentUserId } from "./appStateRepo";
 
 export type OfferStatus = "pending" | "accepted" | "declined" | "expired" | "failed";
 
@@ -16,21 +15,13 @@ export interface OfferRecord {
   updated_at: string;
 }
 
-function requireCurrentUserId(): number {
-  const userId = getCurrentUserId();
-  if (userId == null) throw new Error("No Telegram account is currently connected");
-  return userId;
-}
-
 /**
- * Duplicate protection (scoped to the current account): once ANY offer has
+ * Duplicate protection (scoped to one user): once ANY offer has
  * ever been sent for a given collectible instance (nft_identifier), we
  * never send another — a decline means the owner said no, and re-offering
  * the same item is exactly the duplicate-spam behavior this must prevent.
  */
-export function hasBlockingOffer(nftIdentifier: string): boolean {
-  const userId = getCurrentUserId();
-  if (userId == null) return false;
+export function hasBlockingOffer(userId: number, nftIdentifier: string): boolean {
   const row = db
     .prepare(`SELECT 1 FROM offers WHERE user_id = ? AND nft_identifier = ? LIMIT 1`)
     .get(userId, nftIdentifier);
@@ -38,29 +29,26 @@ export function hasBlockingOffer(nftIdentifier: string): boolean {
 }
 
 /**
- * Per-owner duplicate protection (scoped to the current account): once ANY
+ * Per-owner duplicate protection (scoped to one user): once ANY
  * offer has ever been sent to a given owner — regardless of which
  * collectible it was for, and regardless of status (pending, accepted,
  * declined, expired, failed) — that owner is never offered again, on
  * anything. One offer per owner, full stop.
  */
-export function hasOwnerBeenOffered(ownerId: string): boolean {
-  const userId = getCurrentUserId();
-  if (userId == null) return false;
+export function hasOwnerBeenOffered(userId: number, ownerId: string): boolean {
   const row = db
     .prepare(`SELECT 1 FROM offers WHERE user_id = ? AND owner_id = ? LIMIT 1`)
     .get(userId, ownerId);
   return !!row;
 }
 
-export function createOffer(params: {
+export function createOffer(userId: number, params: {
   nftIdentifier: string;
   ownerId: string;
   stars: number;
   duration: number;
   telegramOfferId?: string;
 }): OfferRecord {
-  const userId = requireCurrentUserId();
   const result = db
     .prepare(
       `INSERT INTO offers (user_id, nft_identifier, owner_id, stars, duration, telegram_offer_id, status)
@@ -86,37 +74,30 @@ export function updateOfferStatus(id: number, status: OfferStatus): void {
 }
 
 export function updateOfferStatusByOwnerAndNft(
+  userId: number,
   ownerId: string,
   nftIdentifier: string,
   status: OfferStatus
 ): void {
-  const userId = getCurrentUserId();
-  if (userId == null) return;
   db.prepare(
     `UPDATE offers SET status = ?, updated_at = datetime('now')
      WHERE user_id = ? AND owner_id = ? AND nft_identifier = ? AND status = 'pending'`
   ).run(status, userId, ownerId, nftIdentifier);
 }
 
-export function listOffers(): OfferRecord[] {
-  const userId = getCurrentUserId();
-  if (userId == null) return [];
+export function listOffers(userId: number): OfferRecord[] {
   return db
     .prepare("SELECT * FROM offers WHERE user_id = ? ORDER BY created_at DESC")
     .all(userId) as OfferRecord[];
 }
 
-export function listPendingOffers(): OfferRecord[] {
-  const userId = getCurrentUserId();
-  if (userId == null) return [];
+export function listPendingOffers(userId: number): OfferRecord[] {
   return db
     .prepare("SELECT * FROM offers WHERE user_id = ? AND status = 'pending'")
     .all(userId) as OfferRecord[];
 }
 
-export function countByStatus(status: OfferStatus): number {
-  const userId = getCurrentUserId();
-  if (userId == null) return 0;
+export function countByStatus(userId: number, status: OfferStatus): number {
   const row = db
     .prepare("SELECT COUNT(*) as c FROM offers WHERE user_id = ? AND status = ?")
     .get(userId, status) as { c: number };

@@ -9,9 +9,9 @@ import { withRetry } from "./retry";
  * can't be read — callers should treat that as "unknown, stay paused"
  * rather than assuming funds are available.
  */
-export async function getStarsBalance(): Promise<number | null> {
+export async function getStarsBalance(tenantId: string): Promise<number | null> {
   try {
-    const client = await ensureConnected();
+    const client = await ensureConnected(tenantId);
     const result = await withRetry(
       () =>
         client.invoke(

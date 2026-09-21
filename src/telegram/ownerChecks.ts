@@ -13,8 +13,8 @@ import { withRetry } from "./retry";
  * callers treat this conservatively as "unknown, don't offer" rather than
  * assuming a low level.
  */
-export async function getOwnerLevel(ownerPeer: Api.TypePeer): Promise<number | null> {
-  const client = await ensureConnected();
+export async function getOwnerLevel(tenantId: string, ownerPeer: Api.TypePeer): Promise<number | null> {
+  const client = await ensureConnected(tenantId);
   try {
     const inputPeer = await client.getInputEntity(ownerPeer);
     const inputUser = utils.getInputUser(inputPeer);
@@ -38,8 +38,8 @@ export async function getOwnerLevel(ownerPeer: Api.TypePeer): Promise<number | n
  * profile — Telegram doesn't expose gifts a user has hidden, official API or
  * not.
  */
-export async function countOwnerUniqueGifts(ownerPeer: Api.TypePeer, capAt: number): Promise<number> {
-  const client = await ensureConnected();
+export async function countOwnerUniqueGifts(tenantId: string, ownerPeer: Api.TypePeer, capAt: number): Promise<number> {
+  const client = await ensureConnected(tenantId);
   let count = 0;
   let offset = "";
   const MAX_PAGES = 10; // hard stop against runaway pagination for huge collections
@@ -76,15 +76,16 @@ export interface OwnerEligibility {
 }
 
 export async function checkOwnerEligibility(
+  tenantId: string,
   ownerPeer: Api.TypePeer,
   limits: { maxOwnerLevel: number; maxOwnerNftCount: number }
 ): Promise<OwnerEligibility> {
-  const level = await getOwnerLevel(ownerPeer);
+  const level = await getOwnerLevel(tenantId, ownerPeer);
   if (level == null || level > limits.maxOwnerLevel) {
     return { eligible: false, level, nftCount: -1 };
   }
 
-  const nftCount = await countOwnerUniqueGifts(ownerPeer, limits.maxOwnerNftCount);
+  const nftCount = await countOwnerUniqueGifts(tenantId, ownerPeer, limits.maxOwnerNftCount);
   const eligible = nftCount < limits.maxOwnerNftCount;
   return { eligible, level, nftCount };
 }

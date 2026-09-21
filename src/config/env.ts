@@ -25,7 +25,13 @@ export const env = {
   webPublicUrl: process.env.WEB_PUBLIC_URL ?? "http://localhost:3000",
   databasePath,
   sessionFilePath: path.resolve(process.cwd(), process.env.SESSION_FILE_PATH ?? "./data/telegram.session"),
+  // Per-user encrypted sessions live in a `sessions/` directory next to the
+  // legacy single-file path (so it sits on the same persistent volume).
+  sessionsDir: path.join(path.dirname(path.resolve(process.cwd(), process.env.SESSION_FILE_PATH ?? "./data/telegram.session")), "sessions"),
   sessionEncryptionKey: required("SESSION_ENCRYPTION_KEY"),
+  // Telegram user id of the admin (may manage /adduser, /removeuser, /users).
+  // Never hardcoded — set ADMIN_TELEGRAM_ID on the backend service.
+  adminTelegramId: Number(process.env.ADMIN_TELEGRAM_ID) || null,
   // Deliberately not a separate env var: lives next to the database, so
   // pointing DATABASE_PATH at a Railway volume (e.g. /data/app.db) carries
   // the thumbnail cache onto that same persistent volume automatically

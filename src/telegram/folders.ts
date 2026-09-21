@@ -27,8 +27,8 @@ function nextFolderId(filters: Api.TypeDialogFilter[]): number {
   return maxId + 1;
 }
 
-async function findOfferFolder(): Promise<{ filter: Api.DialogFilter; all: Api.TypeDialogFilter[] } | null> {
-  const client = await ensureConnected();
+async function findOfferFolder(tenantId: string): Promise<{ filter: Api.DialogFilter; all: Api.TypeDialogFilter[] } | null> {
+  const client = await ensureConnected(tenantId);
   const result = await withRetry(() => client.invoke(new Api.messages.GetDialogFilters()), {
     label: "messages.getDialogFilters",
   });
@@ -41,12 +41,12 @@ async function findOfferFolder(): Promise<{ filter: Api.DialogFilter; all: Api.T
 }
 
 /** Best-effort: folder bookkeeping must never block or fail the actual offer flow. */
-export async function addOwnerToOfferFolder(ownerPeer: Api.TypePeer, ownerId: string): Promise<void> {
+export async function addOwnerToOfferFolder(tenantId: string, ownerPeer: Api.TypePeer, ownerId: string): Promise<void> {
   try {
-    const client = await ensureConnected();
+    const client = await ensureConnected(tenantId);
     const inputPeer = await client.getInputEntity(ownerPeer);
 
-    const found = await findOfferFolder();
+    const found = await findOfferFolder(tenantId);
     if (!found) return;
     const { filter: existing, all } = found;
 
@@ -78,10 +78,10 @@ export async function addOwnerToOfferFolder(ownerPeer: Api.TypePeer, ownerId: st
   }
 }
 
-export async function removeOwnerFromOfferFolder(ownerId: string): Promise<void> {
+export async function removeOwnerFromOfferFolder(tenantId: string, ownerId: string): Promise<void> {
   try {
-    const client = await ensureConnected();
-    const found = await findOfferFolder();
+    const client = await ensureConnected(tenantId);
+    const found = await findOfferFolder(tenantId);
     if (!found?.filter) return;
     const existing = found.filter;
 

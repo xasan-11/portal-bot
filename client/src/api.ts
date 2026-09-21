@@ -4,10 +4,27 @@
 export const API_ORIGIN = (import.meta.env.VITE_API_URL ?? "").replace(/\/$/, "");
 const BASE = `${API_ORIGIN}/api`;
 
+export class ApiError extends Error {
+  constructor(message: string, public status: number) {
+    super(message);
+  }
+}
+
+// Telegram signs the user's identity into initData (only present when opened
+// as a Mini App). The backend verifies its HMAC on every request and derives
+// the user from it — the client never states who it is.
+function telegramInitData(): string {
+  return (window as any).Telegram?.WebApp?.initData ?? "";
+}
+
 async function request<T>(path: string, options?: RequestInit): Promise<T> {
   const res = await fetch(BASE + path, {
-    headers: { "Content-Type": "application/json" },
     ...options,
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `tma ${telegramInitData()}`,
+      ...(options?.headers ?? {}),
+    },
   });
 
   // A 200 with a non-JSON body (almost always this dashboard's own
@@ -22,7 +39,7 @@ async function request<T>(path: string, options?: RequestInit): Promise<T> {
   const data = isJson ? await res.json().catch(() => null) : null;
 
   if (!res.ok) {
-    throw new Error((data as { error?: string } | null)?.error ?? `So'rov bajarilmadi (HTTP ${res.status})`);
+    throw new ApiError((data as { error?: string } | null)?.error ?? `So'rov bajarilmadi (HTTP ${res.status})`, res.status);
   }
   if (data === null) {
     throw new Error(

@@ -3,9 +3,19 @@ import { env } from "../config/env";
 import { NftCatalogItem } from "../telegram/gifts";
 import { AutomationStatus } from "../automation/monitor";
 
+/**
+ * Opens the page as a Telegram Mini App (so Telegram signs the user's
+ * identity into initData, which the backend verifies). Telegram only allows
+ * web_app buttons on https URLs; local http dev falls back to a plain link
+ * (the API will then reject it — there is no signed identity).
+ */
+function appButton(text: string, url: string) {
+  return url.startsWith("https://") ? Markup.button.webApp(text, url) : Markup.button.url(text, url);
+}
+
 export function mainMenu(connected: boolean, running: boolean) {
   return Markup.inlineKeyboard([
-    [Markup.button.url("🔐 Login qilish", `${env.webPublicUrl}/login`)],
+    [appButton("🔐 Login qilish", `${env.webPublicUrl}/login`)],
     [Markup.button.callback("🖼 NFT tanlash", "menu:nft")],
     [
       running
@@ -53,7 +63,7 @@ export function settingsKeyboard(autoOffer: boolean) {
         "settings:toggle_auto"
       ),
     ],
-    [Markup.button.url("🌐 Dashboardda batafsil sozlash", env.webPublicUrl)],
+    [appButton("🌐 Dashboardda batafsil sozlash", env.webPublicUrl)],
     [Markup.button.callback("⬅️ Orqaga", "menu:home")],
   ]);
 }

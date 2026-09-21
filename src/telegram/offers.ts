@@ -5,15 +5,16 @@ import bigInt from "big-integer";
 import { ensureConnected } from "./client";
 import { withRetry } from "./retry";
 import { updateOfferStatusByOwnerAndNft } from "../database/repositories/offersRepo";
+import { getUserByTelegramId } from "../database/repositories/usersRepo";
 import { removeOwnerFromOfferFolder } from "./folders";
 
-export async function sendGiftOffer(params: {
+export async function sendGiftOffer(tenantId: string, params: {
   ownerPeer: Api.TypePeer;
   slug: string;
   stars: number;
   durationSeconds: number;
 }): Promise<{ telegramOfferId: string }> {
-  const client = await ensureConnected();
+  const client = await ensureConnected(tenantId);
   const randomId = bigInt(crypto.randomBytes(8).toString("hex"), 16);
 
   await withRetry(
@@ -33,7 +34,13 @@ export async function sendGiftOffer(params: {
   return { telegramOfferId: randomId.toString() };
 }
 
-let listenerRegistered = false;
+/** Tenants whose current client already has the handler attached. */
+const listenerRegistered = new Set<string>();
+
+/** Call on logout: the client is discarded, so a later login must re-attach. */
+export function unregisterOfferResolutionListener(tenantId: string): void {
+  listenerRegistered.delete(tenantId);
+}
 
 /**
  * Listens for the service messages Telegram emits when a sent offer is
@@ -54,11 +61,11 @@ let listenerRegistered = false;
  * unfiltered, so we inspect `Api.MessageService` ourselves instead of
  * relying on either built-in event class.
  */
-export function registerOfferResolutionListener(): void {
-  if (listenerRegistered) return;
-  listenerRegistered = true;
+export function registerOfferResolutionListener(tenantId: string): void {
+  if (listenerRegistered.has(tenantId)) return;
+  listenerRegistered.add(tenantId);
 
-  ensureConnected().then((client) => {
+  ensureConnected(tenantId).then((client) => {
     client.addEventHandler(async (update: Api.TypeUpdate) => {
       if (!(update instanceof Api.UpdateNewMessage || update instanceof Api.UpdateNewChannelMessage)) {
         return;
@@ -67,6 +74,8 @@ export function registerOfferResolutionListener(): void {
       if (!(message instanceof Api.MessageService)) return;
       const action = message.action;
       if (!action) return;
+      const userId = getUserByTelegramId(tenantId)?.id;
+      if (userId == null) return;
 
       const peerId = message.peerId;
       const ownerId =
@@ -82,15 +91,18 @@ export function registerOfferResolutionListener(): void {
       // nft_identifier in our DB is the per-instance slug, not the collection gift_id.
       if (action instanceof Api.MessageActionStarGiftUnique && action.fromOffer) {
         const slug = action.gift instanceof Api.StarGiftUnique ? action.gift.slug : "";
-        if (slug) updateOfferStatusByOwnerAndNft(ownerId, slug, "accepted");
+        if (slug) updateOfferStatusByOwnerAndNft(userId, ownerId, slug, "accepted");
       } else if (action instanceof Api.MessageActionStarGiftPurchaseOfferDeclined) {
         const slug = action.gift instanceof Api.StarGiftUnique ? action.gift.slug : "";
         if (slug) {
           const status = action.expired ? "expired" : "declined";
-          updateOfferStatusByOwnerAndNft(ownerId, slug, status);
-          await removeOwnerFromOfferFolder(ownerId);
+          updateOfferStatusByOwnerAndNft(userId, ownerId, slug, status);
+          await removeOwnerFromOfferFolder(tenantId, ownerId);
         }
       }
     }, new Raw({ types: [Api.UpdateNewMessage, Api.UpdateNewChannelMessage] }));
+  }).catch((err) => {
+    listenerRegistered.delete(tenantId);
+    console.error(`[offers] could not attach resolution listener for ${tenantId}:`, err);
   });
 }

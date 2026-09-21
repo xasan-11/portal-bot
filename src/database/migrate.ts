@@ -193,3 +193,40 @@ export function ensureBaselinedColumn(db: Database.Database): void {
   db.exec("ALTER TABLE selected_nfts ADD COLUMN baselined INTEGER NOT NULL DEFAULT 0");
   console.log("[migrate] selected_nfts: added `baselined` column (defaults to 0 — one warm-up scan per collection)");
 }
+
+/**
+ * Upgrade from the single-account layout (one global "currently connected"
+ * pointer in `app_state`) to one `users` row per Telegram user. The account
+ * that was connected at the time is the (only) owner, so its data is
+ * attributed to ADMIN_TELEGRAM_ID by re-keying that `users` row — every
+ * offer / selection / setting hangs off `users.id`, so nothing else moves.
+ * Then `app_state` is dropped, which also makes this a no-op on later runs.
+ */
+export function migrateToMultiTenant(db: Database.Database, adminTelegramId: number | null): void {
+  const hasAppState = db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='app_state'").get();
+  if (!hasAppState) return;
+
+  const current = db.prepare("SELECT current_user_id FROM app_state WHERE id = 1").get() as
+    | { current_user_id: number | null }
+    | undefined;
+  const currentUserId = current?.current_user_id ?? null;
+
+  if (currentUserId != null && adminTelegramId == null) {
+    console.warn("[migrate] ADMIN_TELEGRAM_ID is not set — keeping app_state until it is, so existing data can be attributed to the admin");
+    return;
+  }
+
+  db.transaction(() => {
+    if (currentUserId != null && adminTelegramId != null) {
+      const admin = String(adminTelegramId);
+      const clash = db
+        .prepare("SELECT id FROM users WHERE telegram_user_id = ? AND id != ?")
+        .get(admin, currentUserId);
+      if (!clash) {
+        db.prepare("UPDATE users SET telegram_user_id = ? WHERE id = ?").run(admin, currentUserId);
+        console.log(`[migrate] existing account data (users.id=${currentUserId}) attributed to admin ${admin}`);
+      }
+    }
+    db.exec("DROP TABLE app_state");
+  })();
+}

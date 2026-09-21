@@ -287,6 +287,7 @@ dashboard, so treat it as the source of truth.
 | `DATABASE_PATH` | `/data/app.db` (see volume step below) |
 | `SESSION_FILE_PATH` | `/data/telegram.session` |
 | `WEB_PUBLIC_URL` | the **frontend's** Railway domain, e.g. `https://your-frontend.up.railway.app` — this is what CORS allows and what the bot's "🔐 Login qilish" button links to |
+| `ADMIN_TELEGRAM_ID` | your numeric Telegram id (via @userinfobot). The only person who can `/adduser`, `/removeuser`, `/users`; always approved. Existing single-account data and session are attributed to this id on first boot. Per-user sessions are stored in `sessions/` next to `SESSION_FILE_PATH` |
 | `NIXPACKS_NODE_VERSION` | `20` (see below — belt-and-suspenders alongside `engines.node`) |
 
 Don't set `PORT` or `WEB_PORT` — Railway injects `PORT` itself, and

@@ -5,6 +5,7 @@ import cors from "cors";
 import { env } from "../config/env";
 import { authRouter } from "./routes/auth";
 import { apiRouter } from "./routes/api";
+import { requireApprovedTelegramUser } from "./middleware/telegramAuth";
 
 // In dev, the dashboard is served separately by Vite (client/vite.config.ts
 // proxies /api and /gift-thumbnails back to this server). In production
@@ -20,6 +21,8 @@ export function createWebServer() {
   app.use(cors({ origin: env.webPublicUrl }));
   app.use(express.json());
 
+  // Everything under /api requires Telegram-verified, approved user (initData HMAC).
+  app.use("/api", requireApprovedTelegramUser);
   app.use("/api/auth", authRouter);
   app.use("/api", apiRouter);
   app.use(

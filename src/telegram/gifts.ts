@@ -45,8 +45,8 @@ function cleanTitle(title: string): string {
  * included — plain non-upgradable gifts never appear as resale NFTs, so
  * they'd be useless as a monitoring filter.
  */
-export async function getGlobalGiftCatalog(): Promise<NftCatalogItem[]> {
-  const client = await ensureConnected();
+export async function getGlobalGiftCatalog(tenantId: string): Promise<NftCatalogItem[]> {
+  const client = await ensureConnected(tenantId);
 
   const result = await withRetry(
     () => client.invoke(new Api.payments.GetStarGifts({ hash: 0 })),
@@ -73,8 +73,8 @@ export async function getGlobalGiftCatalog(): Promise<NftCatalogItem[]> {
  * currently-listed collectible instances of that base gift, including the
  * current owner — everything the offer flow needs.
  */
-export async function getResaleListings(giftIdentifier: string): Promise<ResaleListing[]> {
-  const client = await ensureConnected();
+export async function getResaleListings(tenantId: string, giftIdentifier: string): Promise<ResaleListing[]> {
+  const client = await ensureConnected(tenantId);
 
   const result = await withRetry(
     () =>

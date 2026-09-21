@@ -1,3 +1,6 @@
+-- One row per Telegram user of the bot (telegram_user_id = the id verified
+-- from Telegram, not the account they log in with). Every data table below
+-- is scoped to users.id.
 CREATE TABLE IF NOT EXISTS users (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   telegram_user_id TEXT NOT NULL UNIQUE,
@@ -5,15 +8,14 @@ CREATE TABLE IF NOT EXISTS users (
   created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
--- Tracks which users.id is the currently connected Telegram account.
--- Separate from `users` (a permanent historical record) so logging out
--- doesn't lose a user's data, and logging the same account back in later
--- resumes with the same id. NULL current_user_id means logged out.
-CREATE TABLE IF NOT EXISTS app_state (
-  id INTEGER PRIMARY KEY CHECK (id = 1),
-  current_user_id INTEGER REFERENCES users(id)
+-- Who may use the bot / mini app. The admin (ADMIN_TELEGRAM_ID) is always
+-- approved implicitly and needs no row here.
+CREATE TABLE IF NOT EXISTS approved_users (
+  telegram_user_id INTEGER PRIMARY KEY,
+  added_by INTEGER NOT NULL,
+  added_at INTEGER NOT NULL,
+  note TEXT
 );
-INSERT OR IGNORE INTO app_state (id, current_user_id) VALUES (1, NULL);
 
 CREATE TABLE IF NOT EXISTS selected_nfts (
   id INTEGER PRIMARY KEY AUTOINCREMENT,

@@ -2,7 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import Database from "better-sqlite3";
 import { env } from "../config/env";
-import { migrateLegacySchema, ensureBaselinedColumn } from "./migrate";
+import { migrateLegacySchema, ensureBaselinedColumn, migrateToMultiTenant } from "./migrate";
 
 fs.mkdirSync(path.dirname(env.databasePath), { recursive: true });
 
@@ -18,3 +18,5 @@ ensureBaselinedColumn(db);
 
 const schemaPath = path.join(__dirname, "schema.sql");
 db.exec(fs.readFileSync(schemaPath, "utf-8"));
+
+migrateToMultiTenant(db, env.adminTelegramId); // after schema.sql so `users` exists on fresh DBs too
