@@ -116,7 +116,7 @@ export async function stopDueToSpam(ctx: TenantCtx, err: unknown): Promise<void>
     "Avtomatizatsiya to'xtatildi.",
     "",
     "Kutilayotgan (hali offer yuborilmagan) gift'lar:",
-    ...(pending.length > 0 ? pending.map((n) => `• ${n.nft_identifier} → ${n.owner_id ?? "—"}`) : ["—"]),
+    ...(pending.length > 0 ? pending.flatMap((n) => [`• ${n.nft_identifier} → ${n.owner_id ?? "—"}`, `  https://t.me/nft/${n.nft_identifier}`]) : ["—"]),
   ];
   console.warn(`[automation] spam restriction for ${ctx.tenantId}: ${describeError(err)} — automation stopped`);
   try {
