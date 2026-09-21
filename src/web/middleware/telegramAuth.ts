@@ -1,7 +1,6 @@
 import crypto from "node:crypto";
 import type { Request, Response, NextFunction } from "express";
 import { env } from "../../config/env";
-import { isApproved } from "../../database/repositories/approvedUsersRepo";
 import { tenantFor } from "../../tenant";
 import type { TenantCtx } from "../../automation/monitor";
 
@@ -59,7 +58,7 @@ declare module "express-serve-static-core" {
 /**
  * Every /api request must carry `Authorization: tma <initData>`. The user id
  * used from here on is ONLY the one signed by Telegram — never anything the
- * client sends in a body/query/header — and that user must be approved.
+ * client sends in a body/query/header. (Approved-list check currently disabled.)
  */
 export function requireApprovedTelegramUser(req: Request, res: Response, next: NextFunction) {
   const header = req.header("authorization") ?? "";
@@ -68,9 +67,9 @@ export function requireApprovedTelegramUser(req: Request, res: Response, next: N
   if (!verified) {
     return res.status(401).json({ error: "Telegram orqali tasdiqlanmadi. Ilovani bot ichidan oching." });
   }
-  if (!isApproved(verified.userId)) {
-    return res.status(403).json({ error: "Ruxsat berilmagan" });
-  }
+  // Kirish nazorati vaqtincha o'chirilgan: identifikatsiya Telegram tomonidan tasdiqlanadi,
+  // lekin approved_users ro'yxatida bo'lish shart emas. Qayta yoqish:
+  // if (!isApproved(verified.userId)) return res.status(403).json({ error: "Ruxsat berilmagan" });
   req.tenant = tenantFor(verified.userId, verified.username);
   next();
 }

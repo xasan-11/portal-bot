@@ -12,7 +12,7 @@ import {
   removeApprovedUser,
   listApprovedUsers,
 } from "../database/repositories/approvedUsersRepo";
-import { tenantFor, revokeUser, listConnectedAccounts } from "../tenant";
+import { tenantFor, listConnectedAccounts } from "../tenant";
 import { getStarsBalance } from "../telegram/balance";
 import { parsePostLink, sendPaidReaction, UserFacingError } from "../telegram/paidReactions";
 import { mainMenu, cancelKeyboard, starsAccountKeyboard, statusLine, automationStatusLine, nftSelectionKeyboard, settingsKeyboard } from "./keyboards";
@@ -37,9 +37,8 @@ const adminOnly: MiddlewareFn<Context> = async (ctx, next) => {
 };
 
 /**
- * Global gate (approved_only): registered before every handler, so no
- * command, button press or message reaches any feature unless the sender is
- * the admin or on the approved list.
+ * Global gate (approved_only). NOT registered right now (access control is
+ * disabled); kept so it can be switched back on with `bot.use(approvedOnly)`.
  */
 const approvedOnly: MiddlewareFn<Context> = async (ctx, next) => {
   const id = ctx.from?.id;
@@ -83,7 +82,9 @@ function commandArgs(ctx: Context): string[] {
 export function createBot(): Telegraf {
   const bot = new Telegraf(env.botToken);
 
-  bot.use(approvedOnly);
+  // Kirish nazorati vaqtincha o'chirilgan: approvedOnly middleware ishlatilmayapti,
+  // istalgan foydalanuvchi botdan foydalana oladi. Quyidagi /adduser, /removeuser,
+  // /users buyruqlari hozircha ta'sirsiz (faqat ro'yxatni yuritadi). Qayta yoqish: bot.use(approvedOnly).
 
   // ── Admin commands ─────────────────────────────────────────────────────
   bot.command("adduser", adminOnly, async (ctx) => {
@@ -108,8 +109,8 @@ export function createBot(): Telegraf {
       return;
     }
     const removed = removeApprovedUser(id);
-    // Even if there was no row, make sure no session / automation is left behind.
-    await revokeUser(id);
+    // Kirish nazorati o'chirilgan: ro'yxatdan chiqarish sessiyani logout qilmaydi (ta'sirsiz).
+    // Nazorat qayta yoqilganda: await revokeUser(id);
     await ctx.reply(removed ? `❌ Foydalanuvchi olib tashlandi: ${id}` : `ℹ️ ${id} ro'yxatda yo'q edi.`);
   });
 

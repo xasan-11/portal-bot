@@ -3,7 +3,6 @@ import { stopAutomation } from "./automation/monitor";
 import { upsertUser, getUserByTelegramId } from "./database/repositories/usersRepo";
 import { logout } from "./telegram/auth";
 import { listSavedSessionTenantIds } from "./telegram/sessionStore";
-import { isApproved } from "./database/repositories/approvedUsersRepo";
 import { isLoggedIn } from "./telegram/client";
 import { registerOfferResolutionListener } from "./telegram/offers";
 
@@ -41,19 +40,13 @@ export async function listConnectedAccounts(): Promise<ConnectedAccount[]> {
 }
 
 /**
- * On boot: re-attach the offer-resolution listener for every approved user
- * that still has a saved session, so their sent offers keep updating even
- * before they open the app. Sessions of users no longer approved are
- * logged out instead of silently kept alive.
+ * On boot: re-attach the offer-resolution listener for every user that
+ * still has a saved session, so their sent offers keep updating even before
+ * they open the app.
  */
 export async function restoreSessions(): Promise<void> {
   for (const tenantId of listSavedSessionTenantIds()) {
     try {
-      if (!isApproved(tenantId)) {
-        console.warn(`[startup] session for ${tenantId} belongs to a non-approved user — logging it out`);
-        await logout(tenantId);
-        continue;
-      }
       if (await isLoggedIn(tenantId)) {
         upsertUser(tenantId, null);
         registerOfferResolutionListener(tenantId);
