@@ -6,7 +6,9 @@ import { sendGiftOffer, registerOfferResolutionListener } from "../telegram/offe
 import { checkOwnerEligibility } from "../telegram/ownerChecks";
 import { addOwnerToOfferFolder, removeOwnerFromOfferFolder } from "../telegram/folders";
 import { getStarsBalance } from "../telegram/balance";
-import { upsertSeenNft, markProcessed } from "../database/repositories/nftsRepo";
+import { upsertSeenNft, markProcessed, setNftStatus, listMatchedNfts, clearMatched } from "../database/repositories/nftsRepo";
+import { getUserByTelegramId } from "../database/repositories/usersRepo";
+import { isSpamRestrictionError, describeError } from "../telegram/spamErrors";
 import {
   hasBlockingOffer,
   hasOwnerBeenOffered,
@@ -18,23 +20,23 @@ import {
 export type AutomationStatus = "stopped" | "running" | "paused_spam" | "paused_balance";
 
 /**
- * Neither PEER_FLOOD nor BALANCE_TOO_LOW has a dedicated "check status"
- * MTProto method (verified: https://core.telegram.org/api/errors.json has
- * no PEER_FLOOD entry at all, and no official docs describe a standalone
- * spam-restriction query). The only way to know a flood restriction has
- * lifted is to retry the exact kind of action that triggered it — a
- * generic harmless call (e.g. help.getConfig) wouldn't be representative,
- * since PEER_FLOOD gates specific "contacting a new peer" actions, not
- * reads. So the spam recheck below allows exactly one real send attempt
- * per pause cycle, using the next legitimately-eligible candidate that
- * discovery already found — not a wasted or fabricated action; it's the
- * real offer we already intended to send. Balance has a real official
- * check (`payments.getStarsStatus`), so that one is a genuine harmless read.
+ * Spam/flood restrictions (PEER_FLOOD, FLOOD_WAIT, ...) no longer pause and
+ * probe: they stop that account's automation and notify the admin (see
+ * stopDueToSpam). Only a low Stars balance still pauses and auto-resumes —
+ * balance has a real official check (`payments.getStarsStatus`).
  */
 const PAUSE_RECHECK_INTERVAL_MS = 90_000; // 1.5 minutes — within the requested 1-2 minute range
 
 /** Only listings first seen within this window get an offer. */
 const NEW_LISTING_WINDOW_MS = 60_000;
+
+type AdminNotifier = (text: string) => Promise<void>;
+let notifyAdmin: AdminNotifier = async () => {};
+
+/** Wired up at startup with the bot's sendMessage-to-admin; kept injectable so this module doesn't import the bot. */
+export function setAdminNotifier(fn: AdminNotifier): void {
+  notifyAdmin = fn;
+}
 
 /**
  * Identifies one bot user: `tenantId` is their verified Telegram user id
@@ -80,17 +82,48 @@ export function startAutomation(ctx: TenantCtx): void {
   const st = getState(ctx);
   if (st.status !== "stopped") return;
   st.status = "running";
+  clearMatched(ctx.userId);
   resetBaselines(ctx.userId); // listings that appeared while we weren't watching aren't "fresh"
   registerOfferResolutionListener(ctx.tenantId);
   scheduleNextTick(ctx, 0);
 }
 
-/** Full stop: no more sending AND no more background monitoring. Offers already sent are left alone. */
+/** Manual stop (Stop button / logout / removal): no more sending AND no more background monitoring. Offers already sent are left alone. Sends no notification. */
 export function stopAutomation(ctx: TenantCtx): void {
   const st = getState(ctx);
   st.status = "stopped";
   if (st.timer) clearTimeout(st.timer);
   st.timer = null;
+}
+
+/**
+ * Automatic stop caused by a Telegram spam/flood restriction on THIS
+ * account only. Unlike the manual stop above, it reports to the admin:
+ * which account, the error, and the gifts that matched but never got an
+ * offer. No-op if already stopped (a tick that was mid-flight when the
+ * restriction hit must not report twice).
+ */
+export async function stopDueToSpam(ctx: TenantCtx, err: unknown): Promise<void> {
+  if (getAutomationStatus(ctx) === "stopped") return;
+  stopAutomation(ctx);
+
+  const pending = listMatchedNfts(ctx.userId);
+  const username = getUserByTelegramId(ctx.tenantId)?.username;
+  const lines = [
+    "🚫 Spam cheklovi aniqlandi",
+    `Akkaunt: ${ctx.tenantId}${username ? ` (@${username})` : ""}`,
+    `Xato: ${describeError(err)}`,
+    "Avtomatizatsiya to'xtatildi.",
+    "",
+    "Kutilayotgan (hali offer yuborilmagan) gift'lar:",
+    ...(pending.length > 0 ? pending.map((n) => `• ${n.nft_identifier} → ${n.owner_id ?? "—"}`) : ["—"]),
+  ];
+  console.warn(`[automation] spam restriction for ${ctx.tenantId}: ${describeError(err)} — automation stopped`);
+  try {
+    await notifyAdmin(lines.join("\n"));
+  } catch (sendErr) {
+    console.error("[automation] failed to notify admin about spam restriction:", sendErr);
+  }
 }
 
 function scheduleNextTick(ctx: TenantCtx, delayMs?: number): void {
@@ -126,11 +159,6 @@ async function tick(ctx: TenantCtx): Promise<void> {
     }
   }
 
-  // Spam pause gets exactly one real send attempt this tick (see comment above);
-  // everything else (discovery/logging, balance-paused ticks, stopped) sends freely
-  // or not at all based on `status` alone.
-  let spamProbeAvailable = getAutomationStatus(ctx) === "paused_spam";
-
   const selected = listEnabledSelectedNfts(userId);
 
   for (const nft of selected) {
@@ -145,6 +173,7 @@ async function tick(ctx: TenantCtx): Promise<void> {
     try {
       listings = await getResaleListings(tenantId, nft.nft_identifier);
     } catch (err) {
+      if (isSpamRestrictionError(err)) return stopDueToSpam(ctx, err);
       console.error(`[automation] failed to fetch resale listings for ${nft.nft_name}:`, err);
       continue;
     }
@@ -182,9 +211,8 @@ async function tick(ctx: TenantCtx): Promise<void> {
         continue; // matched and logged, but sending is disabled in settings
       }
 
-      const canAttemptSend = getAutomationStatus(ctx) === "running" || spamProbeAvailable;
-      if (!canAttemptSend) {
-        continue; // paused on balance, or spam probe already used this tick
+      if (getAutomationStatus(ctx) !== "running") {
+        continue; // paused on balance
       }
 
       let eligibility;
@@ -194,6 +222,7 @@ async function tick(ctx: TenantCtx): Promise<void> {
           maxOwnerNftCount: settings.maxOwnerNftCount,
         });
       } catch (err) {
+        if (isSpamRestrictionError(err)) return stopDueToSpam(ctx, err);
         console.error(`[automation] failed to check owner eligibility for ${listing.slug}:`, err);
         continue; // can't verify the owner meets the criteria — don't offer
       }
@@ -201,8 +230,8 @@ async function tick(ctx: TenantCtx): Promise<void> {
         continue; // owner's level or NFT count is outside the configured limits
       }
 
-      const wasProbe = spamProbeAvailable;
-      if (wasProbe) spamProbeAvailable = false; // consume the probe regardless of outcome
+      // Passed every filter: from here it is a pending gift until the offer actually goes out.
+      setNftStatus(userId, listing.slug, "matched");
 
       try {
         const { telegramOfferId } = await sendGiftOffer(tenantId, {
@@ -220,15 +249,11 @@ async function tick(ctx: TenantCtx): Promise<void> {
         });
         markProcessed(userId, listing.slug, "processed");
         await addOwnerToOfferFolder(tenantId, listing.ownerPeer, listing.ownerId);
-        if (wasProbe) {
-          console.log(`[automation] spam probe succeeded (${listing.slug}) — resuming normal operation`);
-          setStatus(ctx, "running");
-        }
       } catch (err) {
-        if (err instanceof errors.PeerFloodError) {
-          console.warn(`[automation] PEER_FLOOD on ${listing.slug} — pausing new offers, monitoring continues`);
-          setStatus(ctx, "paused_spam");
+        if (isSpamRestrictionError(err)) {
+          return stopDueToSpam(ctx, err); // listing stays 'matched' -> reported as pending
         } else if (err instanceof errors.BalanceTooLowError) {
+          setNftStatus(userId, listing.slug, "found");
           console.warn(`[automation] BALANCE_TOO_LOW on ${listing.slug} — pausing new offers, monitoring continues`);
           setStatus(ctx, "paused_balance");
         } else {

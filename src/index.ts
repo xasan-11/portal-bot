@@ -4,6 +4,7 @@ import { startWebServer } from "./web/server";
 import { migrateLegacySessionFile } from "./telegram/sessionStore";
 import { restoreSessions } from "./tenant";
 import { env } from "./config/env";
+import { setAdminNotifier } from "./automation/monitor";
 
 async function main() {
   if (!env.adminTelegramId) {
@@ -13,6 +14,9 @@ async function main() {
   startWebServer();
 
   const bot = createBot();
+  setAdminNotifier(async (text) => {
+    if (env.adminTelegramId) await bot.telegram.sendMessage(env.adminTelegramId, text);
+  });
   bot
     .launch()
     .then(() => console.log("[bot] Telegram control bot started"))

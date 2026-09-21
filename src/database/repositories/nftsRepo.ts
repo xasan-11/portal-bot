@@ -52,3 +52,24 @@ export function countAll(userId: number): number {
   };
   return row.c;
 }
+
+/** Status change that leaves processed_at alone (used for the transient 'matched' state). */
+export function setNftStatus(userId: number, identifier: string, status: NftRecord["status"]): void {
+  db.prepare("UPDATE nfts SET status = ? WHERE user_id = ? AND nft_identifier = ?").run(status, userId, identifier);
+}
+
+/**
+ * Listings that passed every filter and were about to get an offer but
+ * haven't been sent one (status 'matched'): the "pending gifts" reported when
+ * a spam restriction stops the automation mid-way.
+ */
+export function listMatchedNfts(userId: number): NftRecord[] {
+  return db
+    .prepare("SELECT * FROM nfts WHERE user_id = ? AND status = 'matched' ORDER BY first_seen_at")
+    .all(userId) as NftRecord[];
+}
+
+/** Drops stale 'matched' markers (e.g. from an earlier stop) back to 'found'. */
+export function clearMatched(userId: number): void {
+  db.prepare("UPDATE nfts SET status = 'found' WHERE user_id = ? AND status = 'matched'").run(userId);
+}
