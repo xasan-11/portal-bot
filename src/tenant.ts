@@ -26,6 +26,20 @@ export async function revokeUser(telegramUserId: number): Promise<void> {
   await logout(tenantId);
 }
 
+export interface ConnectedAccount {
+  tenantId: string;
+  username: string | null;
+}
+
+/** Every bot user whose Telegram session is currently logged in. */
+export async function listConnectedAccounts(): Promise<ConnectedAccount[]> {
+  const ids = listSavedSessionTenantIds();
+  const checked = await Promise.all(ids.map(async (id) => ((await isLoggedIn(id)) ? id : null)));
+  return checked
+    .filter((id): id is string => id !== null)
+    .map((id) => ({ tenantId: id, username: getUserByTelegramId(id)?.username ?? null }));
+}
+
 /**
  * On boot: re-attach the offer-resolution listener for every approved user
  * that still has a saved session, so their sent offers keep updating even

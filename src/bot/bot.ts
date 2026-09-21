@@ -12,8 +12,10 @@ import {
   removeApprovedUser,
   listApprovedUsers,
 } from "../database/repositories/approvedUsersRepo";
-import { tenantFor, revokeUser } from "../tenant";
-import { mainMenu, statusLine, automationStatusLine, nftSelectionKeyboard, settingsKeyboard } from "./keyboards";
+import { tenantFor, revokeUser, listConnectedAccounts } from "../tenant";
+import { getStarsBalance } from "../telegram/balance";
+import { parsePostLink, sendPaidReaction, UserFacingError } from "../telegram/paidReactions";
+import { mainMenu, cancelKeyboard, starsAccountKeyboard, statusLine, automationStatusLine, nftSelectionKeyboard, settingsKeyboard } from "./keyboards";
 
 interface NftEditState {
   catalog: NftCatalogItem[];
@@ -50,6 +52,21 @@ const approvedOnly: MiddlewareFn<Context> = async (ctx, next) => {
     console.error("[bot] failed to send access-denied reply:", err);
   }
 };
+
+/** Main menu; the "⭐ Stars" button is added only for the admin. */
+function menu(ctx: Context, connected: boolean, running: boolean) {
+  return mainMenu(connected, running, isAdmin(ctx.from?.id));
+}
+
+/**
+ * Admin-only "⭐ Stars" flow: pick a connected account -> show its balance ->
+ * amount -> post link -> send a paid reaction from that account.
+ * One in-progress flow per admin; cleared on cancel, error or success.
+ */
+type StarsFlow =
+  | { step: "amount"; tenantId: string; balance: number }
+  | { step: "link"; tenantId: string; balance: number; count: number };
+const starsFlow = new Map<number, StarsFlow>();
 
 /** Parses a positive integer Telegram user id; null if it isn't one. */
 function parseUserId(raw: string | undefined): number | null {
@@ -121,14 +138,14 @@ export function createBot(): Telegraf {
   bot.start(async (ctx) => {
     const tenant = tenantFor(ctx.from.id, ctx.from.username);
     const { connected, text } = await homeText(tenant);
-    await ctx.reply(text, mainMenu(connected, isAutomationRunning(tenant)));
+    await ctx.reply(text, menu(ctx, connected, isAutomationRunning(tenant)));
   });
 
   bot.action("menu:home", async (ctx) => {
     await ctx.answerCbQuery();
     const tenant = tenantFor(ctx.from!.id, ctx.from!.username);
     const { connected, text } = await homeText(tenant);
-    await ctx.editMessageText(text, mainMenu(connected, isAutomationRunning(tenant)));
+    await ctx.editMessageText(text, menu(ctx, connected, isAutomationRunning(tenant)));
   });
 
   bot.action("menu:nft", async (ctx) => {
@@ -137,7 +154,7 @@ export function createBot(): Telegraf {
     if (!(await isLoggedIn(tenant.tenantId))) {
       await ctx.editMessageText(
         "🔴 Avval Telegram akkauntingizni ulang.",
-        mainMenu(false, isAutomationRunning(tenant))
+        menu(ctx, false, isAutomationRunning(tenant))
       );
       return;
     }
@@ -145,7 +162,7 @@ export function createBot(): Telegraf {
     if (catalog.length === 0) {
       await ctx.editMessageText(
         "Gift katalogini olishda muammo yoki hozircha mos turlar topilmadi.",
-        mainMenu(true, isAutomationRunning(tenant))
+        menu(ctx, true, isAutomationRunning(tenant))
       );
       return;
     }
@@ -185,7 +202,7 @@ export function createBot(): Telegraf {
     await ctx.answerCbQuery();
     await ctx.editMessageText(
       `✅ ${items.length} ta NFT tanlandi`,
-      mainMenu(await isLoggedIn(tenant.tenantId), isAutomationRunning(tenant))
+      menu(ctx, await isLoggedIn(tenant.tenantId), isAutomationRunning(tenant))
     );
   });
 
@@ -195,21 +212,21 @@ export function createBot(): Telegraf {
     if (!(await isLoggedIn(tenant.tenantId))) {
       await ctx.editMessageText(
         "🔴 Avval Telegram akkauntingizni ulang.",
-        mainMenu(false, isAutomationRunning(tenant))
+        menu(ctx, false, isAutomationRunning(tenant))
       );
       return;
     }
     if (listSelectedNfts(tenant.userId).length === 0) {
       await ctx.editMessageText(
         "⚠️ Avval kamida bitta NFT tanlang (🖼 NFT tanlash).",
-        mainMenu(true, isAutomationRunning(tenant))
+        menu(ctx, true, isAutomationRunning(tenant))
       );
       return;
     }
     startAutomation(tenant);
     await ctx.editMessageText(
       "🟢 Offer avtomatizatsiyasi ishga tushdi",
-      mainMenu(true, true)
+      menu(ctx, true, true)
     );
   });
 
@@ -219,7 +236,7 @@ export function createBot(): Telegraf {
     stopAutomation(tenant);
     await ctx.editMessageText(
       "🔴 Offer avtomatizatsiyasi to'xtatildi",
-      mainMenu(await isLoggedIn(tenant.tenantId), false)
+      menu(ctx, await isLoggedIn(tenant.tenantId), false)
     );
   });
 
@@ -248,6 +265,107 @@ export function createBot(): Telegraf {
     const updated = updateSettings(tenant.userId, { autoOffer: !settings.autoOffer });
     await ctx.answerCbQuery(`Auto Offer: ${updated.autoOffer ? "ON" : "OFF"}`);
     await ctx.editMessageReplyMarkup(settingsKeyboard(updated.autoOffer).reply_markup);
+  });
+
+  // ── ⭐ Stars (admin only) ──────────────────────────────────────────────
+  const denyNonAdmin = async (ctx: Context): Promise<boolean> => {
+    if (isAdmin(ctx.from?.id)) return false;
+    await ctx.answerCbQuery("⛔️ Bu funksiya faqat admin uchun.", { show_alert: true });
+    return true;
+  };
+
+  const showHome = async (ctx: Context, prefix?: string) => {
+    const tenant = tenantFor(ctx.from!.id, ctx.from!.username);
+    const { connected, text } = await homeText(tenant);
+    await ctx.reply(prefix ? `${prefix}\n\n${text}` : text, menu(ctx, connected, isAutomationRunning(tenant)));
+  };
+
+  bot.action("stars:start", async (ctx) => {
+    if (await denyNonAdmin(ctx)) return;
+    await ctx.answerCbQuery();
+    starsFlow.delete(ctx.from!.id);
+    const accounts = await listConnectedAccounts();
+    if (accounts.length === 0) {
+      await ctx.editMessageText("Hech qanday akkaunt ulanmagan.", menu(ctx, false, false));
+      return;
+    }
+    await ctx.editMessageText("Qaysi akkaunt ID'sini ishlatmoqchisiz?", starsAccountKeyboard(accounts));
+  });
+
+  bot.action("stars:cancel", async (ctx) => {
+    if (await denyNonAdmin(ctx)) return;
+    await ctx.answerCbQuery("Bekor qilindi");
+    starsFlow.delete(ctx.from!.id);
+    const tenant = tenantFor(ctx.from!.id, ctx.from!.username);
+    const { connected, text } = await homeText(tenant);
+    await ctx.editMessageText(text, menu(ctx, connected, isAutomationRunning(tenant)));
+  });
+
+  bot.action(/^stars:acc:(\d+)$/, async (ctx) => {
+    if (await denyNonAdmin(ctx)) return;
+    await ctx.answerCbQuery();
+    const tenantId = ctx.match[1];
+    // Only accounts that are really connected can be picked (the button list could be stale).
+    if (!(await listConnectedAccounts()).some((a) => a.tenantId === tenantId)) {
+      starsFlow.delete(ctx.from!.id);
+      await ctx.editMessageText("❌ Bu akkaunt endi ulanmagan. Qaytadan boshlang.", menu(ctx, false, false));
+      return;
+    }
+    const balance = await getStarsBalance(tenantId);
+    if (balance == null) {
+      starsFlow.delete(ctx.from!.id);
+      await ctx.editMessageText("❌ Balansni olib bo'lmadi. Qaytadan urinib ko'ring.", menu(ctx, false, false));
+      return;
+    }
+    starsFlow.set(ctx.from!.id, { step: "amount", tenantId, balance });
+    await ctx.editMessageText(
+      `Akkaunt: ${tenantId}\nBalans: ${balance} ⭐\n\nNechta Stars sarflamoqchisiz?`,
+      cancelKeyboard()
+    );
+  });
+
+  // Free-text input for the flow. Only ever reacts to the admin with an active flow.
+  bot.on("text", async (ctx, next) => {
+    const flow = isAdmin(ctx.from.id) ? starsFlow.get(ctx.from.id) : undefined;
+    if (!flow || ctx.message.text.startsWith("/")) return next();
+    const text = ctx.message.text.trim();
+
+    if (flow.step === "amount") {
+      const count = /^\d{1,7}$/.test(text) ? Number(text) : 0;
+      if (count < 1) {
+        await ctx.reply("❗️ Musbat butun son kiriting (masalan 500).", cancelKeyboard());
+        return;
+      }
+      if (count > flow.balance) {
+        await ctx.reply(`❗️ Balans yetarli emas (${flow.balance} ⭐). Kamroq son kiriting.`, cancelKeyboard());
+        return;
+      }
+      starsFlow.set(ctx.from.id, { step: "link", tenantId: flow.tenantId, balance: flow.balance, count });
+      await ctx.reply(
+        "Qaysi postga? Post havolasini yuboring (masalan https://t.me/kanal_nomi/123)",
+        cancelKeyboard()
+      );
+      return;
+    }
+
+    const link = parsePostLink(text);
+    if (!link) {
+      await ctx.reply("❗️ Havola noto'g'ri. Namuna: https://t.me/kanal_nomi/123", cancelKeyboard());
+      return;
+    }
+    starsFlow.delete(ctx.from.id); // whatever happens next, the flow is over (no double-spend on retry)
+    try {
+      await sendPaidReaction(flow.tenantId, link, flow.count);
+      const newBalance = await getStarsBalance(flow.tenantId);
+      await showHome(
+        ctx,
+        `✅ ${flow.tenantId} orqali ${text} ga ${flow.count} ⭐ reaksiya yuborildi. Yangi balans: ${newBalance ?? "—"} ⭐`
+      );
+    } catch (err) {
+      const reason = err instanceof UserFacingError ? err.message : "Kutilmagan xatolik yuz berdi.";
+      if (!(err instanceof UserFacingError)) console.error("[stars] paid reaction failed:", err);
+      await showHome(ctx, `❌ Yuborilmadi: ${reason}\n\nQayta boshlash uchun "⭐ Stars" ni bosing.`);
+    }
   });
 
   return bot;

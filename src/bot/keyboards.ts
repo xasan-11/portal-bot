@@ -13,8 +13,9 @@ function appButton(text: string, url: string) {
   return url.startsWith("https://") ? Markup.button.webApp(text, url) : Markup.button.url(text, url);
 }
 
-export function mainMenu(connected: boolean, running: boolean) {
+export function mainMenu(connected: boolean, running: boolean, admin = false) {
   return Markup.inlineKeyboard([
+    ...(admin ? [[Markup.button.callback("⭐ Stars", "stars:start")]] : []),
     [appButton("🔐 Login qilish", `${env.webPublicUrl}/login`)],
     [Markup.button.callback("🖼 NFT tanlash", "menu:nft")],
     [
@@ -24,6 +25,18 @@ export function mainMenu(connected: boolean, running: boolean) {
     ],
     [Markup.button.callback("⚙️ Sozlamalar", "menu:settings")],
   ]);
+}
+
+export function cancelKeyboard() {
+  return Markup.inlineKeyboard([[Markup.button.callback("⬅️ Bekor qilish", "stars:cancel")]]);
+}
+
+export function starsAccountKeyboard(accounts: { tenantId: string; username: string | null }[]) {
+  const rows = accounts.map((a) => [
+    Markup.button.callback(a.username ? `${a.tenantId} (@${a.username})` : a.tenantId, `stars:acc:${a.tenantId}`),
+  ]);
+  rows.push([Markup.button.callback("⬅️ Bekor qilish", "stars:cancel")]);
+  return Markup.inlineKeyboard(rows);
 }
 
 export function statusLine(connected: boolean): string {
