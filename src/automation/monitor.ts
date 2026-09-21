@@ -6,9 +6,9 @@ import { sendGiftOffer, registerOfferResolutionListener } from "../telegram/offe
 import { checkOwnerEligibility } from "../telegram/ownerChecks";
 import { addOwnerToOfferFolder, removeOwnerFromOfferFolder } from "../telegram/folders";
 import { getStarsBalance } from "../telegram/balance";
-import { upsertSeenNft, markProcessed, setNftStatus, listMatchedNfts, clearMatched } from "../database/repositories/nftsRepo";
-import { getUserByTelegramId } from "../database/repositories/usersRepo";
-import { isSpamRestrictionError, describeError } from "../telegram/spamErrors";
+import { upsertSeenNft, markProcessed } from "../database/repositories/nftsRepo";
+import { ensureConnected } from "../telegram/client";
+import { isSpamRestrictionError, describeError, getFloodWaitSeconds } from "../telegram/spamErrors";
 import {
   hasBlockingOffer,
   hasOwnerBeenOffered,
@@ -20,23 +20,16 @@ import {
 export type AutomationStatus = "stopped" | "running" | "paused_spam" | "paused_balance";
 
 /**
- * Spam/flood restrictions (PEER_FLOOD, FLOOD_WAIT, ...) no longer pause and
- * probe: they stop that account's automation and notify the admin (see
- * stopDueToSpam). Only a low Stars balance still pauses and auto-resumes —
- * balance has a real official check (`payments.getStarsStatus`).
+ * Spam/flood restrictions (PEER_FLOOD, FLOOD_WAIT, ...) put only the affected
+ * account into a waiting state (see enterRestriction) and clear themselves;
+ * they are logged, never reported to anyone. A low Stars balance also pauses
+ * and auto-resumes — balance has a real official check
+ * (`payments.getStarsStatus`).
  */
 const PAUSE_RECHECK_INTERVAL_MS = 90_000; // 1.5 minutes — within the requested 1-2 minute range
 
 /** Only listings first seen within this window get an offer. */
 const NEW_LISTING_WINDOW_MS = 60_000;
-
-type AdminNotifier = (text: string) => Promise<void>;
-let notifyAdmin: AdminNotifier = async () => {};
-
-/** Wired up at startup with the bot's sendMessage-to-admin; kept injectable so this module doesn't import the bot. */
-export function setAdminNotifier(fn: AdminNotifier): void {
-  notifyAdmin = fn;
-}
 
 /**
  * Identifies one bot user: `tenantId` is their verified Telegram user id
@@ -52,6 +45,10 @@ interface AutomationState {
   status: AutomationStatus;
   timer: NodeJS.Timeout | null;
   ticking: boolean;
+  /** Set while status is paused_spam: why we're waiting and when to resume / re-probe. */
+  restriction: { kind: "flood_wait" | "peer_flood"; resumeAt: number } | null;
+  /** Index into the PEER_FLOOD backoff; only reset by a successful send, so a flood right after a probe keeps escalating. */
+  peerFloodStep: number;
 }
 
 const states = new Map<number, AutomationState>();
@@ -59,7 +56,7 @@ const states = new Map<number, AutomationState>();
 function getState(ctx: TenantCtx): AutomationState {
   let st = states.get(ctx.userId);
   if (!st) {
-    st = { status: "stopped", timer: null, ticking: false };
+    st = { status: "stopped", timer: null, ticking: false, restriction: null, peerFloodStep: 0 };
     states.set(ctx.userId, st);
   }
   return st;
@@ -82,7 +79,7 @@ export function startAutomation(ctx: TenantCtx): void {
   const st = getState(ctx);
   if (st.status !== "stopped") return;
   st.status = "running";
-  clearMatched(ctx.userId);
+  st.restriction = null;
   resetBaselines(ctx.userId); // listings that appeared while we weren't watching aren't "fresh"
   registerOfferResolutionListener(ctx.tenantId);
   scheduleNextTick(ctx, 0);
@@ -96,33 +93,75 @@ export function stopAutomation(ctx: TenantCtx): void {
   st.timer = null;
 }
 
-/**
- * Automatic stop caused by a Telegram spam/flood restriction on THIS
- * account only. Unlike the manual stop above, it reports to the admin:
- * which account, the error, and the gifts that matched but never got an
- * offer. No-op if already stopped (a tick that was mid-flight when the
- * restriction hit must not report twice).
- */
-export async function stopDueToSpam(ctx: TenantCtx, err: unknown): Promise<void> {
-  if (getAutomationStatus(ctx) === "stopped") return;
-  stopAutomation(ctx);
+/** PEER_FLOOD has no stated wait, so it is re-probed on this backoff (minutes), capped at the last value. */
+const PEER_FLOOD_BACKOFF_MIN = [5, 10, 15, 30];
 
-  const pending = listMatchedNfts(ctx.userId);
-  const username = getUserByTelegramId(ctx.tenantId)?.username;
-  const lines = [
-    "🚫 Spam cheklovi aniqlandi",
-    `Akkaunt: ${ctx.tenantId}${username ? ` (@${username})` : ""}`,
-    `Xato: ${describeError(err)}`,
-    "Avtomatizatsiya to'xtatildi.",
-    "",
-    "Kutilayotgan (hali offer yuborilmagan) gift'lar:",
-    ...(pending.length > 0 ? pending.flatMap((n) => [`• ${n.nft_identifier} → ${n.owner_id ?? "—"}`, `  https://t.me/nft/${n.nft_identifier}`]) : ["—"]),
-  ];
-  console.warn(`[automation] spam restriction for ${ctx.tenantId}: ${describeError(err)} — automation stopped`);
+/**
+ * Puts THIS account into the waiting state after a spam/flood error.
+ * Automation stays "on" (monitoring keeps ticking, nothing is sent) and
+ * resumes by itself: FLOOD_WAIT_X waits exactly X seconds; PEER_FLOOD is
+ * probed with a harmless getMe on a 5 -> 10 -> 15 -> 30 min backoff. Only
+ * logged, never sent to anyone. Other accounts have their own state.
+ */
+function enterRestriction(ctx: TenantCtx, err: unknown): void {
+  const st = getState(ctx);
+  if (st.status === "stopped") return; // user stopped it meanwhile
+  const now = Date.now();
+  const waitSec = getFloodWaitSeconds(err);
+
+  if (waitSec != null) {
+    const resumeAt = now + (waitSec + 1) * 1000;
+    st.restriction = { kind: "flood_wait", resumeAt: Math.max(resumeAt, st.restriction?.resumeAt ?? 0) };
+    st.status = "paused_spam";
+    console.warn(`[automation] Akkaunt ${ctx.tenantId}: ${describeError(err)} aniqlandi, ${waitSec}s kutilmoqda...`);
+    return;
+  }
+
+  if (st.restriction) return; // already waiting — don't escalate the backoff from side effects
+  const minutes = PEER_FLOOD_BACKOFF_MIN[Math.min(st.peerFloodStep, PEER_FLOOD_BACKOFF_MIN.length - 1)];
+  st.peerFloodStep++;
+  st.restriction = { kind: "peer_flood", resumeAt: now + minutes * 60_000 };
+  st.status = "paused_spam";
+  console.warn(`[automation] Akkaunt ${ctx.tenantId}: ${describeError(err)} aniqlandi, kutilmoqda (${minutes} daqiqadan keyin qayta tekshiriladi)...`);
+}
+
+function releaseRestriction(ctx: TenantCtx): void {
+  const st = getState(ctx);
+  st.restriction = null;
+  if (st.status === "paused_spam") st.status = "running";
+  console.log(`[automation] Akkaunt ${ctx.tenantId}: cheklov tugadi, davom etilmoqda`);
+}
+
+/**
+ * Called at the start of every tick while restricted. Returns true if this
+ * tick should be skipped entirely (no Telegram calls at all).
+ */
+async function handleRestriction(ctx: TenantCtx): Promise<boolean> {
+  const st = getState(ctx);
+  const r = st.restriction;
+  if (st.status !== "paused_spam") return false;
+  if (!r) {
+    releaseRestriction(ctx);
+    return false;
+  }
+  const now = Date.now();
+  if (r.kind === "flood_wait") {
+    if (now < r.resumeAt) return true; // still inside the wait: don't touch Telegram
+    releaseRestriction(ctx);
+    return false;
+  }
+  // PEER_FLOOD: monitoring continues (read-only, nothing sent) until the next probe is due.
+  if (now < r.resumeAt) return false;
   try {
-    await notifyAdmin(lines.join("\n"));
-  } catch (sendErr) {
-    console.error("[automation] failed to notify admin about spam restriction:", sendErr);
+    await (await ensureConnected(ctx.tenantId)).getMe();
+    releaseRestriction(ctx);
+    return false;
+  } catch (err) {
+    const minutes = PEER_FLOOD_BACKOFF_MIN[Math.min(st.peerFloodStep, PEER_FLOOD_BACKOFF_MIN.length - 1)];
+    st.peerFloodStep++;
+    st.restriction = { kind: "peer_flood", resumeAt: Date.now() + minutes * 60_000 };
+    console.warn(`[automation] Akkaunt ${ctx.tenantId}: tekshiruv o'tmadi (${describeError(err)}), yana ${minutes} daqiqadan keyin tekshiriladi`);
+    return false;
   }
 }
 
@@ -130,8 +169,15 @@ function scheduleNextTick(ctx: TenantCtx, delayMs?: number): void {
   const st = getState(ctx);
   if (st.status === "stopped") return;
   const settings = getSettings(ctx.userId);
+  // While waiting out a FLOOD_WAIT, wake exactly when it ends instead of polling.
+  const floodWakeMs =
+    st.status === "paused_spam" && st.restriction?.kind === "flood_wait"
+      ? Math.min(Math.max(st.restriction.resumeAt - Date.now(), 1000), 3_600_000)
+      : null;
   const delay =
-    delayMs ?? (st.status === "running" ? settings.monitoringIntervalSeconds * 1000 : PAUSE_RECHECK_INTERVAL_MS);
+    delayMs ??
+    floodWakeMs ??
+    (st.status === "running" ? settings.monitoringIntervalSeconds * 1000 : PAUSE_RECHECK_INTERVAL_MS);
   st.timer = setTimeout(async () => {
     if (!st.ticking) {
       st.ticking = true;
@@ -150,6 +196,8 @@ function scheduleNextTick(ctx: TenantCtx, delayMs?: number): void {
 async function tick(ctx: TenantCtx): Promise<void> {
   const { tenantId, userId } = ctx;
   const settings = getSettings(userId);
+
+  if (await handleRestriction(ctx)) return;
 
   if (getAutomationStatus(ctx) === "paused_balance") {
     const balance = await getStarsBalance(tenantId);
@@ -173,7 +221,7 @@ async function tick(ctx: TenantCtx): Promise<void> {
     try {
       listings = await getResaleListings(tenantId, nft.nft_identifier);
     } catch (err) {
-      if (isSpamRestrictionError(err)) return stopDueToSpam(ctx, err);
+      if (isSpamRestrictionError(err)) return enterRestriction(ctx, err);
       console.error(`[automation] failed to fetch resale listings for ${nft.nft_name}:`, err);
       continue;
     }
@@ -222,16 +270,13 @@ async function tick(ctx: TenantCtx): Promise<void> {
           maxOwnerNftCount: settings.maxOwnerNftCount,
         });
       } catch (err) {
-        if (isSpamRestrictionError(err)) return stopDueToSpam(ctx, err);
+        if (isSpamRestrictionError(err)) return enterRestriction(ctx, err);
         console.error(`[automation] failed to check owner eligibility for ${listing.slug}:`, err);
         continue; // can't verify the owner meets the criteria — don't offer
       }
       if (!eligibility.eligible) {
         continue; // owner's level or NFT count is outside the configured limits
       }
-
-      // Passed every filter: from here it is a pending gift until the offer actually goes out.
-      setNftStatus(userId, listing.slug, "matched");
 
       try {
         const { telegramOfferId } = await sendGiftOffer(tenantId, {
@@ -248,12 +293,12 @@ async function tick(ctx: TenantCtx): Promise<void> {
           telegramOfferId,
         });
         markProcessed(userId, listing.slug, "processed");
+        getState(ctx).peerFloodStep = 0; // a real send went through: the account is genuinely healthy again
         await addOwnerToOfferFolder(tenantId, listing.ownerPeer, listing.ownerId);
       } catch (err) {
         if (isSpamRestrictionError(err)) {
-          return stopDueToSpam(ctx, err); // listing stays 'matched' -> reported as pending
+          return enterRestriction(ctx, err);
         } else if (err instanceof errors.BalanceTooLowError) {
-          setNftStatus(userId, listing.slug, "found");
           console.warn(`[automation] BALANCE_TOO_LOW on ${listing.slug} — pausing new offers, monitoring continues`);
           setStatus(ctx, "paused_balance");
         } else {

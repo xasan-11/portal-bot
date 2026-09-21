@@ -24,3 +24,15 @@ export function describeError(err: unknown): string {
   if (e?.errorMessage) return e.seconds != null && !/\d/.test(e.errorMessage) ? `${e.errorMessage} (${e.seconds}s)` : e.errorMessage;
   return e?.message ?? String(err);
 }
+
+/**
+ * Seconds Telegram says to wait (FLOOD_WAIT_X / FLOOD_PREMIUM_WAIT_X, or the
+ * `.seconds` field on FloodWaitError). null for errors with no stated wait
+ * (PEER_FLOOD, USER_RESTRICTED).
+ */
+export function getFloodWaitSeconds(err: unknown): number | null {
+  const e = err as { seconds?: number; errorMessage?: string; message?: string } | null;
+  if (typeof e?.seconds === "number" && e.seconds > 0) return e.seconds;
+  const m = /FLOOD\w*_WAIT_(\d+)/.exec(e?.errorMessage ?? e?.message ?? "");
+  return m ? Number(m[1]) : null;
+}
